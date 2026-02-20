@@ -11,8 +11,6 @@ dependencies = [
     "structlog>=24.0",
     "psutil>=6.0",
     "mss>=9.0",
-    "pystray>=0.19",
-    "pillow>=10.0",
 ]
 
 [project.optional-dependencies]

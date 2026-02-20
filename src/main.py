@@ -5,7 +5,6 @@ import asyncio
 import logging
 import signal
 import sys
-import threading
 from pathlib import Path
 
 import structlog
@@ -99,67 +98,19 @@ def _run_async(stop_event: asyncio.Event) -> None:
 
 
 def entry() -> None:
-    """exe 및 스크립트 진입점 — 트레이는 메인 스레드, asyncio는 별도 스레드"""
+    """exe 및 스크립트 진입점 — 트레이 없이 asyncio 직접 실행 (Linux/Docker 호환)"""
     import os
     if getattr(sys, "frozen", False):
         os.chdir(os.path.dirname(sys.executable))
 
     setup_logging()
     log = logging.getLogger("controltower")
+    log.info("Claude Control Tower 시작 (트레이 없음 모드)")
 
-    # asyncio용 stop_event (스레드 간 공유)
-    # pystray.Icon.stop()에서 asyncio stop_event를 set하기 위해 루프를 나중에 연결
-    _loop_holder: list[asyncio.AbstractEventLoop] = []
-    _stop_holder: list[asyncio.Event] = []
-
-    ready = threading.Event()  # asyncio 루프 준비 완료 신호
-
-    def _async_thread() -> None:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        stop_ev = asyncio.Event()
-        _loop_holder.append(loop)
-        _stop_holder.append(stop_ev)
-        ready.set()  # 루프/이벤트 준비 완료
-        loop.run_until_complete(_async_main(stop_ev))
-
-    t = threading.Thread(target=_async_thread, daemon=True)
-    t.start()
-
-    # 루프/이벤트가 준비될 때까지 대기
-    ready.wait(timeout=10)
-
-    # 트레이 아이콘 (메인 스레드에서 실행 — Windows 필수)
     try:
-        import pystray
-        from PIL import Image, ImageDraw
-
-        img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
-        draw = ImageDraw.Draw(img)
-        draw.ellipse([4, 4, 60, 60], fill=(30, 120, 220, 255))
-        draw.text((18, 18), "CT", fill=(255, 255, 255, 255))
-
-        def on_quit(icon, item):
-            icon.stop()
-            if _loop_holder and _stop_holder:
-                _loop_holder[0].call_soon_threadsafe(_stop_holder[0].set)
-
-        menu = pystray.Menu(
-            pystray.MenuItem("Claude Control Tower", None, enabled=False),
-            pystray.Menu.SEPARATOR,
-            pystray.MenuItem("종료", on_quit),
-        )
-        icon = pystray.Icon("controltower", img, "Claude Control Tower", menu)
-        log.info("트레이 아이콘 시작")
-        icon.run()  # 메인 스레드 블로킹 — 종료 시까지 여기서 대기
-
-    except ImportError:
-        log.info("트레이 비활성 (pystray 없음) — asyncio 스레드 종료 대기")
-        t.join()
+        asyncio.run(_async_main(asyncio.Event()))
     except KeyboardInterrupt:
-        if _loop_holder and _stop_holder:
-            _loop_holder[0].call_soon_threadsafe(_stop_holder[0].set)
-        t.join()
+        log.info("KeyboardInterrupt — 종료")
 
 
 if __name__ == "__main__":

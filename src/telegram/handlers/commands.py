@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import tempfile
 
 from telegram import Update
 from telegram.ext import ContextTypes
@@ -115,33 +117,144 @@ async def new_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("\U0001f195 새 대화를 시작합니다. Claude CLI가 재시작됩니다.")
 
 
+def _split_message(text: str, max_length: int = 3000) -> list[str]:
+    """메시지를 안전하게 분할 (줄바꿈 기준으로 분할하여 마크다운 깨짐 방지)"""
+    if len(text) <= max_length:
+        return [text]
+
+    chunks = []
+    current = ""
+    for line in text.splitlines(keepends=True):
+        if len(current) + len(line) > max_length:
+            if current:
+                chunks.append(current)
+            # 단일 라인이 max_length 초과시 강제 분할
+            while len(line) > max_length:
+                chunks.append(line[:max_length])
+                line = line[max_length:]
+            current = line
+        else:
+            current += line
+    if current:
+        chunks.append(current)
+    return chunks
+
+
 async def chat_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """일반 메시지를 상시 대기 중인 Claude Code CLI로 전달"""
+    """일반 메시지를 상시 대기 중인 Claude Code CLI로 전달 (레거시 - 직접 호출용)"""
     if not await _check_allowed(update, ctx):
         return
-    prompt = update.message.text
-    if not prompt:
-        return
+    await _process_message(
+        bot=ctx.bot,
+        update_data=update.to_dict(),
+        bot_data=dict(ctx.bot_data),
+        chat_id=update.effective_chat.id,
+        message_id=update.message.message_id,
+        ack_message_id=None,
+    )
 
-    # typing 액션을 주기적으로 갱신하는 태스크
+
+async def _process_message(
+    bot,
+    update_data: dict,
+    bot_data: dict,
+    chat_id: int,
+    message_id: int,
+    ack_message_id: int | None,
+) -> None:
+    """실제 Claude 처리 로직 - MessageQueue 워커에서 호출됨"""
+    from telegram import Update as TGUpdate, Bot
+
+    update = TGUpdate.de_json(update_data, bot)
+
+    async def _delete_ack() -> None:
+        """수신 확인 메시지 삭제"""
+        if ack_message_id:
+            try:
+                await bot.delete_message(chat_id=chat_id, message_id=ack_message_id)
+            except Exception:
+                pass
+
+    async def _send_reply(reply: str) -> None:
+        """응답 전송 (3000자 초과 시 파일)"""
+        if len(reply) > 3000:
+            with tempfile.NamedTemporaryFile(
+                mode="w", suffix=".md", delete=False, encoding="utf-8"
+            ) as f:
+                f.write(reply)
+                tmp_path = f.name
+            try:
+                with open(tmp_path, "rb") as f:
+                    await bot.send_document(
+                        chat_id=chat_id,
+                        document=f,
+                        filename="response.md",
+                        caption="📄 응답이 길어 파일로 전송합니다.",
+                        reply_to_message_id=message_id,
+                    )
+            finally:
+                os.unlink(tmp_path)
+        else:
+            chunks = _split_message(reply)
+            for chunk in chunks:
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text=chunk,
+                    reply_to_message_id=message_id,
+                )
+
+    # typing 액션 주기적 갱신
     async def keep_typing() -> None:
         while True:
             try:
-                await update.message.chat.send_action("typing")
+                await bot.send_chat_action(chat_id=chat_id, action="typing")
                 await asyncio.sleep(4)
             except asyncio.CancelledError:
                 break
             except Exception:
                 break
 
+    # 이미지 메시지 처리
+    if update.message and update.message.photo:
+        photo = update.message.photo[-1]
+        photo_file = await bot.get_file(photo.file_id)
+
+        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
+            tmp_path = tmp.name
+
+        await photo_file.download_to_drive(tmp_path)
+        caption = update.message.caption or "이 이미지에 대해 설명해줘"
+
+        typing_task = asyncio.create_task(keep_typing())
+        try:
+            prompt = f"[이미지 첨부됨: {tmp_path}]\n{caption}"
+            reply = await session_mod.ask(prompt)
+            await _delete_ack()
+            await _send_reply(reply)
+        except Exception as e:
+            logger.exception("Claude CLI 오류 (이미지)")
+            await _delete_ack()
+            await bot.send_message(chat_id=chat_id, text=f"❌ 오류: {e}", reply_to_message_id=message_id)
+        finally:
+            typing_task.cancel()
+            os.unlink(tmp_path)
+        return
+
+    # 텍스트 메시지 처리
+    prompt = update.message.text if update.message else None
+    if not prompt:
+        await _delete_ack()
+        return
+
     typing_task = asyncio.create_task(keep_typing())
     try:
         reply = await session_mod.ask(prompt)
-        for i in range(0, len(reply), 4096):
-            await update.message.reply_text(reply[i:i + 4096])
+        await _delete_ack()
+        await _send_reply(reply)
     except Exception as e:
         logger.exception("Claude CLI 오류")
-        await update.message.reply_text(f"\u274c 오류: {e}")
+        await _delete_ack()
+        await bot.send_message(chat_id=chat_id, text=f"❌ 오류: {e}", reply_to_message_id=message_id)
     finally:
         typing_task.cancel()
 
