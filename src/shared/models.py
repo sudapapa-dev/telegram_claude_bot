@@ -1,0 +1,82 @@
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from enum import Enum
+from uuid import uuid4
+
+from pydantic import BaseModel, Field
+
+
+class InstanceStatus(str, Enum):
+    IDLE = "idle"
+    RUNNING = "running"
+    ERROR = "error"
+    STOPPED = "stopped"
+
+
+class TaskStatus(str, Enum):
+    PENDING = "pending"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _new_id() -> str:
+    return uuid4().hex[:12]
+
+
+class Instance(BaseModel):
+    """Claude Code 인스턴스 정보"""
+    id: str = Field(default_factory=_new_id)
+    name: str
+    working_dir: str
+    status: InstanceStatus = InstanceStatus.STOPPED
+    api_key: str = ""
+    model: str = "claude-sonnet-4-6"
+    created_at: datetime = Field(default_factory=_utcnow)
+    current_task_id: str | None = None
+
+
+class Task(BaseModel):
+    """실행 작업 정보"""
+    id: str = Field(default_factory=_new_id)
+    instance_id: str
+    prompt: str
+    status: TaskStatus = TaskStatus.PENDING
+    priority: int = 0
+    created_at: datetime = Field(default_factory=_utcnow)
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    result: str | None = None
+    error: str | None = None
+
+
+class InstanceConfig(BaseModel):
+    """인스턴스 생성 설정"""
+    name: str
+    working_dir: str
+    api_key: str
+    model: str = "claude-sonnet-4-6"
+
+
+class ChatMessage(BaseModel):
+    """Default Claude 대화 메시지"""
+    id: str = Field(default_factory=_new_id)
+    role: str  # "user" | "assistant"
+    content: str
+    created_at: datetime = Field(default_factory=_utcnow)
+
+
+class SystemStatus(BaseModel):
+    """전체 시스템 상태 요약"""
+    total: int = 0
+    running: int = 0
+    idle: int = 0
+    stopped: int = 0
+    error: int = 0
+    pending_tasks: int = 0
