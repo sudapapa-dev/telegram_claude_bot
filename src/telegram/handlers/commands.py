@@ -48,6 +48,11 @@ async def start_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     text = (
         "*Claude Control Tower*\n\n"
         "메시지를 입력하면 AI가 응답합니다\\.\n\n"
+        "🤖 *자율 개발 에이전트팀*\n"
+        "/dev \\<요구사항\\> \\- PM→설계→개발→테스트→QA 자동 수행\n"
+        "/devstatus \\[id\\] \\- 워크플로우 상태 조회\n"
+        "/devcancel \\[id\\] \\- 워크플로우 취소\n\n"
+        "⚙️ *시스템*\n"
         "/new \\- 새 대화 시작 \\+ AI 선택 \\(Claude/Gemini\\)\n"
         "/status \\- 시스템 상태\n"
         "/logs \\<id\\> \\[lines\\] \\- 로그 조회\n"
@@ -270,6 +275,160 @@ async def _process_message(
         await bot.send_message(chat_id=chat_id, text=f"❌ 오류: {e}", reply_to_message_id=message_id)
     finally:
         typing_task.cancel()
+
+
+async def dev_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """자율 개발 워크플로우 시작: /dev <요구사항>"""
+    if not await _check_allowed(update, ctx):
+        return
+
+    args = ctx.args or []
+    requirement = " ".join(args).strip()
+
+    if not requirement:
+        await update.message.reply_text(
+            "📋 **자율 개발 에이전트팀**\n\n"
+            "사용법: `/dev <요구사항>`\n\n"
+            "예시:\n"
+            "• `/dev 파이썬으로 간단한 계산기 CLI 앱을 만들어줘`\n"
+            "• `/dev FastAPI로 TODO 앱 REST API 서버를 만들어줘`\n"
+            "• `/dev 웹 스크래핑으로 뉴스 수집하는 봇을 만들어줘`\n\n"
+            "AI가 PM 분석 → 설계 → 개발 → 테스트 → QA까지 자동으로 수행합니다!",
+            parse_mode="Markdown",
+        )
+        return
+
+    from src.agent.workflow import get_workflow_manager
+    from src.telegram.keyboards import workflow_control_keyboard
+
+    wf_mgr = get_workflow_manager()
+    chat_id = update.effective_chat.id
+    bot = ctx.bot
+
+    # 시작 메시지
+    start_msg = await update.message.reply_text(
+        f"🚀 **자율 개발 시작!**\n\n"
+        f"📝 요구사항: {requirement[:200]}\n\n"
+        f"⏳ PM 분석을 시작합니다...",
+        parse_mode="Markdown",
+    )
+
+    async def send_update(text: str) -> None:
+        """텔레그램으로 진행 상황 전송"""
+        try:
+            chunks = _split_message(text, max_length=3000)
+            for chunk in chunks:
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text=chunk,
+                    parse_mode="Markdown",
+                    reply_to_message_id=start_msg.message_id,
+                )
+        except Exception as e:
+            logger.warning("워크플로우 업데이트 전송 실패: %s", e)
+
+    # 워크플로우 시작 (백그라운드)
+    wf = await wf_mgr.start(requirement=requirement, update_callback=send_update)
+
+    await bot.send_message(
+        chat_id=chat_id,
+        text=f"✅ 워크플로우 시작됨: `{wf.id}`\n진행 상황이 실시간으로 업데이트됩니다.",
+        parse_mode="Markdown",
+        reply_markup=workflow_control_keyboard(wf.id),
+        reply_to_message_id=start_msg.message_id,
+    )
+
+
+async def devstatus_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """/devstatus [id] - 워크플로우 상태 조회"""
+    if not await _check_allowed(update, ctx):
+        return
+
+    from src.agent.workflow import get_workflow_manager, WorkflowStatus
+
+    wf_mgr = get_workflow_manager()
+    args = ctx.args or []
+
+    if args:
+        # 특정 워크플로우 상태 조회
+        wf = wf_mgr.get(args[0])
+        if not wf:
+            await update.message.reply_text(f"❌ 워크플로우 없음: `{args[0]}`", parse_mode="Markdown")
+            return
+
+        status_emoji = {
+            WorkflowStatus.PENDING: "⏳",
+            WorkflowStatus.RUNNING: "🔄",
+            WorkflowStatus.COMPLETED: "✅",
+            WorkflowStatus.FAILED: "❌",
+            WorkflowStatus.CANCELLED: "🚫",
+        }
+        emoji = status_emoji.get(wf.status, "❓")
+        phase_info = f"\n현재 단계: {wf.current_phase.value}" if wf.current_phase and wf.status == WorkflowStatus.RUNNING else ""
+        error_info = f"\n오류: {wf.error}" if wf.error else ""
+
+        text = (
+            f"{emoji} **워크플로우 상태**\n\n"
+            f"ID: `{wf.id}`\n"
+            f"상태: {wf.status.value}"
+            f"{phase_info}"
+            f"\n소요시간: {wf.elapsed()}"
+            f"{error_info}\n\n"
+            f"요구사항: {wf.requirement[:100]}"
+        )
+        await update.message.reply_text(text, parse_mode="Markdown")
+    else:
+        # 전체 워크플로우 목록
+        all_wfs = wf_mgr.list_all()
+        if not all_wfs:
+            await update.message.reply_text("📭 실행된 워크플로우가 없습니다.")
+            return
+
+        status_emoji = {
+            WorkflowStatus.PENDING: "⏳",
+            WorkflowStatus.RUNNING: "🔄",
+            WorkflowStatus.COMPLETED: "✅",
+            WorkflowStatus.FAILED: "❌",
+            WorkflowStatus.CANCELLED: "🚫",
+        }
+
+        lines = ["📋 **워크플로우 목록**\n"]
+        for wf in all_wfs[:10]:
+            emoji = status_emoji.get(wf.status, "❓")
+            ts = wf.created_at.strftime("%m/%d %H:%M")
+            req_preview = wf.requirement[:40] + ("..." if len(wf.requirement) > 40 else "")
+            lines.append(f"{emoji} `{wf.id}` [{ts}] {req_preview}")
+
+        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
+async def devcancel_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """/devcancel [id] - 워크플로우 취소"""
+    if not await _check_allowed(update, ctx):
+        return
+
+    from src.agent.workflow import get_workflow_manager
+
+    wf_mgr = get_workflow_manager()
+    args = ctx.args or []
+
+    if not args:
+        # 실행 중인 워크플로우 모두 취소
+        active = wf_mgr.active()
+        if not active:
+            await update.message.reply_text("ℹ️ 실행 중인 워크플로우가 없습니다.")
+            return
+        for wf in active:
+            await wf_mgr.cancel(wf.id)
+        await update.message.reply_text(f"🚫 {len(active)}개 워크플로우 취소됨")
+        return
+
+    wf_id = args[0]
+    cancelled = await wf_mgr.cancel(wf_id)
+    if cancelled:
+        await update.message.reply_text(f"🚫 취소 요청됨: `{wf_id}`", parse_mode="Markdown")
+    else:
+        await update.message.reply_text(f"❌ 취소 실패 (이미 종료됨): `{wf_id}`", parse_mode="Markdown")
 
 
 async def history_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:

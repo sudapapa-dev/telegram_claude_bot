@@ -22,6 +22,7 @@ from src.telegram.handlers.callbacks import (
 )
 from src.telegram.handlers.commands import (
     chat_handler,
+    dev_command, devstatus_command, devcancel_command,
     history_command,
     logs_command, new_command, setmodel_command,
     start_command, status_command,
@@ -154,6 +155,9 @@ class ControlTowerBot:
             ("setmodel", setmodel_command),
             ("new", new_command),
             ("history", history_command),
+            ("dev", dev_command),
+            ("devstatus", devstatus_command),
+            ("devcancel", devcancel_command),
         ]:
             self.app.add_handler(CommandHandler(name, handler))
         self.app.add_handler(conv)
