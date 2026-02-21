@@ -139,63 +139,6 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> in
         await query.edit_message_text(text, parse_mode="Markdown")
         return None
 
-    # 워크플로우 제어
-    if data.startswith("workflow:"):
-        parts = data.split(":", 2)
-        if len(parts) < 3:
-            await query.edit_message_text("❌ 잘못된 요청")
-            return None
-        _, action, wf_id = parts
-
-        from src.agent.workflow import get_workflow_manager, WorkflowStatus
-        from src.telegram.keyboards import workflow_status_keyboard
-        wf_mgr = get_workflow_manager()
-
-        if action == "cancel":
-            wf = wf_mgr.get(wf_id)
-            if not wf:
-                await query.edit_message_text(f"❌ 워크플로우 없음: `{wf_id}`", parse_mode="Markdown")
-                return None
-            if wf.status not in (WorkflowStatus.PENDING, WorkflowStatus.RUNNING):
-                await query.edit_message_text(
-                    f"ℹ️ 이미 종료된 워크플로우입니다: `{wf_id}` ({wf.status.value})",
-                    parse_mode="Markdown",
-                )
-                return None
-            cancelled = await wf_mgr.cancel(wf_id)
-            if cancelled:
-                await query.edit_message_text(f"🚫 취소 요청됨: `{wf_id}`", parse_mode="Markdown")
-            else:
-                await query.edit_message_text(f"❌ 취소 실패: `{wf_id}`", parse_mode="Markdown")
-            return None
-
-        if action == "status":
-            wf = wf_mgr.get(wf_id)
-            if not wf:
-                await query.edit_message_text(f"❌ 워크플로우 없음: `{wf_id}`", parse_mode="Markdown")
-                return None
-            status_emoji = {
-                WorkflowStatus.PENDING: "⏳",
-                WorkflowStatus.RUNNING: "🔄",
-                WorkflowStatus.COMPLETED: "✅",
-                WorkflowStatus.FAILED: "❌",
-                WorkflowStatus.CANCELLED: "🚫",
-            }
-            emoji = status_emoji.get(wf.status, "❓")
-            phase_info = f"\n현재 단계: {wf.current_phase.value}" if wf.current_phase and wf.status == WorkflowStatus.RUNNING else ""
-            error_info = f"\n오류: {wf.error}" if wf.error else ""
-            text = (
-                f"{emoji} **워크플로우 상태**\n\n"
-                f"ID: `{wf.id}`\n"
-                f"상태: {wf.status.value}"
-                f"{phase_info}"
-                f"\n소요시간: {wf.elapsed()}"
-                f"{error_info}"
-            )
-            markup = workflow_status_keyboard(wf_id) if wf.status == WorkflowStatus.RUNNING else None
-            await query.edit_message_text(text, parse_mode="Markdown", reply_markup=markup)
-            return None
-
     return None
 
 

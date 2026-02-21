@@ -9,7 +9,6 @@ from pathlib import Path
 
 import structlog
 
-from src.agent.workflow import init_workflow_manager
 from src.orchestrator.manager import InstanceManager
 from src.shared import ai_session
 from src.shared.chat_history import ChatHistoryStore
@@ -51,10 +50,6 @@ async def _async_main(stop_event: asyncio.Event) -> None:
         gemini_path=settings.gemini_path,
         gemini_model=settings.gemini_model or None,
     )
-
-    # 자율 개발 에이전트팀 워크플로우 매니저 초기화
-    workspace_dir = settings.claude_workspace or str(base_dir / "workspace")
-    init_workflow_manager(base_workspace=workspace_dir)
 
     # 대화 이력 스토어 초기화
     history_store = ChatHistoryStore(json_path=base_dir / "chat_history.json", db=db)

@@ -67,21 +67,6 @@ def ai_select_keyboard(current: AIProvider) -> InlineKeyboardMarkup:
     ])
 
 
-def workflow_control_keyboard(workflow_id: str) -> InlineKeyboardMarkup:
-    """워크플로우 제어 키보드 (취소 버튼)"""
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🚫 취소", callback_data=f"workflow:cancel:{workflow_id}")],
-    ])
-
-
-def workflow_status_keyboard(workflow_id: str) -> InlineKeyboardMarkup:
-    """워크플로우 상태 조회 키보드"""
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔄 상태 새로고침", callback_data=f"workflow:status:{workflow_id}")],
-        [InlineKeyboardButton("🚫 취소", callback_data=f"workflow:cancel:{workflow_id}")],
-    ])
-
-
 def task_list_keyboard(tasks: list[Task]) -> InlineKeyboardMarkup:
     emoji = {
         TaskStatus.COMPLETED: "\u2705", TaskStatus.FAILED: "\u274c",
