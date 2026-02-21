@@ -10,7 +10,7 @@ from pathlib import Path
 import structlog
 
 from src.orchestrator.manager import InstanceManager
-from src.shared import claude_session
+from src.shared import ai_session
 from src.shared.chat_history import ChatHistoryStore
 from src.shared.config import Settings
 from src.shared.database import Database
@@ -40,19 +40,21 @@ async def _async_main(stop_event: asyncio.Event) -> None:
     # 실행파일/스크립트 기준 경로
     base_dir = Path(sys.executable).parent if getattr(sys, "frozen", False) else Path(__file__).parent.parent
 
-    # 전역 Claude CLI 프로세스 초기화
+    # AI 세션 매니저 초기화 (Claude / Gemini)
     scripts_dir = base_dir / "scripts"
-    claude_session.init_default(
+    ai_session.init_default(
         claude_path=settings.claude_code_path,
         model=settings.default_model or None,
         working_dir=settings.claude_workspace or None,
         scripts_dir=str(scripts_dir) if scripts_dir.exists() else None,
+        gemini_path=settings.gemini_path,
+        gemini_model=settings.gemini_model or None,
     )
 
     # 대화 이력 스토어 초기화
     history_store = ChatHistoryStore(json_path=base_dir / "chat_history.json", db=db)
     await history_store.load()
-    claude_session.set_history_store(history_store)
+    ai_session.set_history_store(history_store)
 
     orchestrator = InstanceManager(
         db=db, event_bus=event_bus,
@@ -87,7 +89,7 @@ async def _async_main(stop_event: asyncio.Event) -> None:
         log.info("종료 중...")
         await bot.stop()
         await orchestrator.stop()
-        await claude_session.stop()
+        await ai_session.stop()
         await db.close()
         log.info("종료 완료")
 

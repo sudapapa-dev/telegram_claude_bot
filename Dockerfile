@@ -12,13 +12,18 @@ RUN apt-get update && apt-get install -y \
 # Claude Code CLI 설치
 RUN npm install -g @anthropic-ai/claude-code
 
+# Gemini CLI 설치
+RUN npm install -g @google/gemini-cli || true
+
 # 작업 디렉토리 설정
 WORKDIR /app
 
 # 의존성 파일 복사 및 설치
 COPY pyproject.toml ./
 COPY src/ ./src/
-COPY scripts/ ./scripts/
+
+# scripts 폴더는 선택적 복사 (없어도 동작)
+RUN mkdir -p /app/scripts
 
 RUN pip install --no-cache-dir -e .
 

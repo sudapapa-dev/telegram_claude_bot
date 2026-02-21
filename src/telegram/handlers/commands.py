@@ -9,7 +9,8 @@ from telegram import Update
 from telegram.ext import ContextTypes
 
 from src.orchestrator.manager import InstanceManager
-from src.shared import claude_session as session_mod
+from src.shared import ai_session as session_mod
+from src.shared.ai_session import AIProvider, get_manager
 from src.shared.chat_history import ChatHistoryStore
 
 logger = logging.getLogger(__name__)
@@ -46,11 +47,12 @@ async def start_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return
     text = (
         "*Claude Control Tower*\n\n"
-        "메시지를 입력하면 Claude Code가 응답합니다\\.\n\n"
+        "메시지를 입력하면 AI가 응답합니다\\.\n\n"
+        "/new \\- 새 대화 시작 \\+ AI 선택 \\(Claude/Gemini\\)\n"
         "/status \\- 시스템 상태\n"
         "/logs \\<id\\> \\[lines\\] \\- 로그 조회\n"
         "/setmodel \\<id\\> \\<model\\> \\- 모델 변경\n"
-        "/new \\- 새 대화 시작 \\(세션 초기화\\)"
+        "/history \\- 대화 이력"
     )
     await update.message.reply_text(text, parse_mode="MarkdownV2")
 
@@ -110,11 +112,22 @@ async def setmodel_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> No
 
 
 async def new_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """새 대화 시작 - 프로세스 재시작"""
+    """새 대화 시작 - AI provider 선택 키보드 표시"""
     if not await _check_allowed(update, ctx):
         return
-    await session_mod.new_session()
-    await update.message.reply_text("\U0001f195 새 대화를 시작합니다. Claude CLI가 재시작됩니다.")
+    from src.telegram.keyboards import ai_select_keyboard
+    mgr = get_manager()
+    current = mgr.provider
+    text = (
+        f"🆕 *새 대화 시작*\n\n"
+        f"현재: {current.display_name()}\n\n"
+        f"사용할 AI를 선택하세요:"
+    )
+    await update.message.reply_text(
+        text,
+        parse_mode="Markdown",
+        reply_markup=ai_select_keyboard(current),
+    )
 
 
 def _split_message(text: str, max_length: int = 3000) -> list[str]:
