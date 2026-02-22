@@ -25,6 +25,7 @@ from src.telegram.handlers.commands import (
     history_command,
     logs_command, new_command, setmodel_command,
     start_command, status_command,
+    task_command, taskcancel_command, taskstatus_command,
 )
 
 logger = logging.getLogger(__name__)
@@ -154,6 +155,9 @@ class ControlTowerBot:
             ("setmodel", setmodel_command),
             ("new", new_command),
             ("history", history_command),
+            ("task", task_command),
+            ("taskcancel", taskcancel_command),
+            ("taskstatus", taskstatus_command),
         ]:
             self.app.add_handler(CommandHandler(name, handler))
         self.app.add_handler(conv)

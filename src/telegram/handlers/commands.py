@@ -48,6 +48,11 @@ async def start_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     text = (
         "*Claude Control Tower*\n\n"
         "메시지를 입력하면 AI가 응답합니다\\.\n\n"
+        "⚡ *백그라운드 작업 \\(대화 블로킹 없음\\)*\n"
+        "/task \\<지시\\> \\- 독립 세션으로 작업 실행\n"
+        "/taskstatus \\- 실행 중인 작업 목록\n"
+        "/taskcancel \\[id\\] \\- 작업 취소\n\n"
+        "⚙️ *시스템*\n"
         "/new \\- 새 대화 시작 \\+ AI 선택 \\(Claude/Gemini\\)\n"
         "/status \\- 시스템 상태\n"
         "/logs \\<id\\> \\[lines\\] \\- 로그 조회\n"
@@ -270,6 +275,121 @@ async def _process_message(
         await bot.send_message(chat_id=chat_id, text=f"❌ 오류: {e}", reply_to_message_id=message_id)
     finally:
         typing_task.cancel()
+
+
+async def task_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """/task <지시> - 독립 작업 세션으로 백그라운드 실행 (메인 대화 블로킹 없음)"""
+    if not await _check_allowed(update, ctx):
+        return
+
+    args = ctx.args or []
+    prompt = " ".join(args).strip()
+
+    if not prompt:
+        await update.message.reply_text(
+            "⚡ *독립 작업 세션*\n\n"
+            "사용법: `/task <지시>`\n\n"
+            "예시:\n"
+            "• `/task D:/project에 README.md 작성해줘`\n"
+            "• `/task D:/myapp 전체 코드 리뷰해줘`\n\n"
+            "작업 중에도 일반 대화가 가능합니다.\n"
+            "완료되면 결과를 알려드립니다.",
+            parse_mode="Markdown",
+        )
+        return
+
+    import uuid
+    from src.shared.ai_session import get_manager
+
+    task_id = uuid.uuid4().hex[:8]
+    chat_id = update.effective_chat.id
+    bot = ctx.bot
+    orig_msg_id = update.message.message_id
+
+    # 완료 콜백 - 텔레그램으로 결과 전송
+    async def on_done(tid: str, result: str, error: str | None) -> None:
+        if error and error != "취소됨":
+            await bot.send_message(
+                chat_id=chat_id,
+                text=f"❌ *작업 실패* (`{tid}`)\n\n{error[:500]}",
+                parse_mode="Markdown",
+                reply_to_message_id=orig_msg_id,
+            )
+        elif error == "취소됨":
+            await bot.send_message(
+                chat_id=chat_id,
+                text=f"🚫 *작업 취소됨* (`{tid}`)",
+                parse_mode="Markdown",
+                reply_to_message_id=orig_msg_id,
+            )
+        else:
+            chunks = _split_message(result or "(결과 없음)")
+            for chunk in chunks:
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text=chunk,
+                    reply_to_message_id=orig_msg_id,
+                )
+
+    mgr = get_manager()
+    mgr.task_sessions.run(task_id=task_id, prompt=prompt, on_done=on_done)
+
+    await update.message.reply_text(
+        f"⚡ *작업 시작됨* (`{task_id}`)\n\n"
+        f"📝 {prompt[:200]}\n\n"
+        f"완료되면 이 메시지에 답장으로 결과를 보내드립니다.\n"
+        f"취소: `/taskcancel {task_id}`",
+        parse_mode="Markdown",
+    )
+
+
+async def taskcancel_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """/taskcancel [id] - 실행 중인 작업 취소"""
+    if not await _check_allowed(update, ctx):
+        return
+
+    from src.shared.ai_session import get_manager
+
+    args = ctx.args or []
+    mgr = get_manager()
+
+    if not args:
+        active = mgr.task_sessions.list_active()
+        if not active:
+            await update.message.reply_text("ℹ️ 실행 중인 작업이 없습니다.")
+            return
+        for tid in active:
+            await mgr.task_sessions.cancel(tid)
+        await update.message.reply_text(f"🚫 {len(active)}개 작업 취소됨: {', '.join(f'`{t}`' for t in active)}", parse_mode="Markdown")
+        return
+
+    task_id = args[0]
+    cancelled = await mgr.task_sessions.cancel(task_id)
+    if cancelled:
+        await update.message.reply_text(f"🚫 취소 요청됨: `{task_id}`", parse_mode="Markdown")
+    else:
+        await update.message.reply_text(f"❌ 작업 없음 또는 이미 완료: `{task_id}`", parse_mode="Markdown")
+
+
+async def taskstatus_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """/taskstatus - 실행 중인 작업 목록"""
+    if not await _check_allowed(update, ctx):
+        return
+
+    from src.shared.ai_session import get_manager
+
+    mgr = get_manager()
+    active = mgr.task_sessions.list_active()
+
+    if not active:
+        await update.message.reply_text("📭 실행 중인 작업이 없습니다.")
+        return
+
+    lines = [f"⚡ *실행 중인 작업 {len(active)}개*\n"]
+    for tid in active:
+        lines.append(f"• `{tid}` - 실행 중")
+    lines.append(f"\n취소: `/taskcancel <id>`")
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
 async def history_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:

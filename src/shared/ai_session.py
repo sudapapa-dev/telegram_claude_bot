@@ -254,6 +254,115 @@ class GeminiSession(BaseAISession):
 
 
 # ─────────────────────────────────────────────
+# 독립 작업 세션 (매번 새 프로세스, 백그라운드)
+# ─────────────────────────────────────────────
+
+class TaskSession:
+    """독립 작업 세션 - 매번 새 Claude 프로세스로 실행, 완료 후 종료.
+
+    대화 세션(ClaudeSession)과 완전히 분리되어 메인 대화를 블로킹하지 않음.
+    """
+
+    def __init__(
+        self,
+        task_id: str,
+        prompt: str,
+        claude_path: str = "claude",
+        model: str | None = None,
+        working_dir: str | None = None,
+        on_done: "Callable[[str, str, str | None], None] | None" = None,
+    ) -> None:
+        from typing import Callable
+        self.task_id = task_id
+        self.prompt = prompt
+        self.claude_path = claude_path
+        self.model = model
+        self.working_dir = (working_dir.strip() if working_dir else None) or str(Path.home())
+        self.on_done = on_done  # (task_id, result, error) 콜백
+        self._task: asyncio.Task | None = None
+
+    def start(self) -> asyncio.Task:
+        """백그라운드 asyncio Task로 실행 시작"""
+        self._task = asyncio.create_task(self._run(), name=f"task-{self.task_id}")
+        return self._task
+
+    async def cancel(self) -> None:
+        if self._task and not self._task.done():
+            self._task.cancel()
+
+    async def _run(self) -> None:
+        session = ClaudeSession(
+            claude_path=self.claude_path,
+            model=self.model,
+            working_dir=self.working_dir,
+        )
+        result: str | None = None
+        error: str | None = None
+        try:
+            await session.start()
+            result = await session.ask(self.prompt, timeout=1800)
+        except asyncio.CancelledError:
+            error = "취소됨"
+        except Exception as e:
+            error = str(e)
+            logger.exception("TaskSession 실패: id=%s", self.task_id)
+        finally:
+            await session.stop()
+            if self.on_done:
+                try:
+                    await self.on_done(self.task_id, result or "", error)
+                except Exception:
+                    logger.exception("TaskSession 콜백 오류: id=%s", self.task_id)
+            logger.info("TaskSession 완료: id=%s, error=%s", self.task_id, error)
+
+
+class TaskSessionManager:
+    """실행 중인 TaskSession 목록 관리"""
+
+    def __init__(self, claude_path: str = "claude", model: str | None = None, working_dir: str | None = None) -> None:
+        self.claude_path = claude_path
+        self.model = model
+        self.working_dir = working_dir
+        self._sessions: dict[str, TaskSession] = {}
+
+    def run(
+        self,
+        task_id: str,
+        prompt: str,
+        on_done: "Callable | None" = None,
+    ) -> TaskSession:
+        """새 독립 작업 세션 시작"""
+        from typing import Callable
+        session = TaskSession(
+            task_id=task_id,
+            prompt=prompt,
+            claude_path=self.claude_path,
+            model=self.model,
+            working_dir=self.working_dir,
+            on_done=on_done,
+        )
+        self._sessions[task_id] = session
+        session.start()
+        logger.info("TaskSession 시작: id=%s, prompt=%s...", task_id, prompt[:50])
+        return session
+
+    async def cancel(self, task_id: str) -> bool:
+        session = self._sessions.get(task_id)
+        if session:
+            await session.cancel()
+            return True
+        return False
+
+    def list_active(self) -> list[str]:
+        return [tid for tid, s in self._sessions.items() if s._task and not s._task.done()]
+
+    async def cancel_all(self) -> None:
+        for session in self._sessions.values():
+            await session.cancel()
+        self._sessions.clear()
+
+
+# ─────────────────────────────────────────────
 # 전역 세션 관리자
 # ─────────────────────────────────────────────
 
@@ -265,6 +374,7 @@ class AISessionManager:
         self._provider: AIProvider = AIProvider.CLAUDE
         self._history_store = None
         self._configs: dict[str, dict] = {}
+        self.task_sessions: TaskSessionManager = TaskSessionManager()
 
     def configure(
         self,
@@ -290,6 +400,12 @@ class AISessionManager:
                 "working_dir": working_dir,
             },
         }
+        # 작업 세션 매니저도 같은 Claude 설정으로 초기화
+        self.task_sessions = TaskSessionManager(
+            claude_path=claude_path,
+            model=claude_model,
+            working_dir=claude_working_dir or working_dir,
+        )
 
     def set_history_store(self, store) -> None:
         self._history_store = store
