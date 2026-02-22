@@ -29,7 +29,7 @@ from src.telegram.handlers.commands import (
 
 logger = logging.getLogger(__name__)
 
-MAX_WORKERS = 5  # 최대 병렬 처리 수
+MAX_WORKERS = 1  # Claude 세션이 1개이므로 워커도 1개 (응답 혼선 방지)
 
 
 @dataclass
