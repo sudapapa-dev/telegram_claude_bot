@@ -21,8 +21,9 @@ services:
       - ./data:/app/data
       # 작업 디렉토리 (코딩 작업용)
       - ./workspace:/app/workspace
-      # Claude 설정 (인증 정보 공유)
-      - ~/.claude:/root/.claude:ro
+      # Claude 인증 정보 영속화 (appuser 홈 경로에 마운트)
+      # NAS 호스트에 ./claude_auth 폴더 생성 후 .credentials.json 복사 필요
+      - ./claude_auth:/home/appuser/.claude
 
     # NAS에서 컨테이너 로그 확인용
     logging:
