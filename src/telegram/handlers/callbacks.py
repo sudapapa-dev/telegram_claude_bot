@@ -6,9 +6,8 @@ from telegram import Update
 from telegram.ext import ContextTypes, ConversationHandler
 
 from src.orchestrator.manager import InstanceManager
-from src.shared.ai_session import AIProvider, get_manager
 from src.telegram.keyboards import (
-    ai_select_keyboard, confirm_keyboard, instance_detail_keyboard,
+    confirm_keyboard, instance_detail_keyboard,
     instance_list_keyboard, task_list_keyboard,
 )
 
@@ -99,27 +98,6 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> in
 
     if data == "cancel":
         await query.edit_message_text("\u274c 취소됨")
-        return None
-
-    # AI provider 선택
-    if data.startswith("ai_select:"):
-        provider_str = data.split(":", 1)[1]
-        try:
-            provider = AIProvider.from_str(provider_str)
-        except ValueError:
-            await query.edit_message_text("❌ 알 수 없는 AI provider")
-            return None
-
-        mgr = get_manager()
-        prev = mgr.provider
-        await mgr.new_session(provider)
-
-        text = (
-            f"✅ *AI 전환 완료*\n\n"
-            f"{prev.display_name()} → {provider.display_name()}\n\n"
-            f"새 대화가 시작됩니다. 메시지를 입력하세요!"
-        )
-        await query.edit_message_text(text, parse_mode="Markdown")
         return None
 
     # 작업 상세

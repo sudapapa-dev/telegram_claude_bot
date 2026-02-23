@@ -14,10 +14,6 @@ class Settings(BaseSettings):
     default_model: str = "claude-sonnet-4-6"
     claude_workspace: str = ""             # Claude Code 작업 디렉토리
 
-    # Gemini CLI
-    gemini_path: str = "gemini"
-    gemini_model: str = "gemini-2.0-flash"
-
     database_path: str = "./controltower.db"
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}

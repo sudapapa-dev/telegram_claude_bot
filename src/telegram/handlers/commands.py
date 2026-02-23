@@ -4,16 +4,19 @@ import asyncio
 import logging
 import os
 import tempfile
+import uuid
 
 from telegram import Update
 from telegram.ext import ContextTypes
 
 from src.orchestrator.manager import InstanceManager
 from src.shared import ai_session as session_mod
-from src.shared.ai_session import AIProvider, get_manager
 from src.shared.chat_history import ChatHistoryStore
 
 logger = logging.getLogger(__name__)
+
+# 실행 중인 백그라운드 작업 목록 {task_id: asyncio.Task}
+_task_sessions: dict[str, asyncio.Task] = {}
 
 
 def _mgr(ctx: ContextTypes.DEFAULT_TYPE) -> InstanceManager:
@@ -47,13 +50,13 @@ async def start_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return
     text = (
         "*Claude Control Tower*\n\n"
-        "메시지를 입력하면 AI가 응답합니다\\.\n\n"
+        "메시지를 입력하면 Claude가 응답합니다\\.\n\n"
         "⚡ *백그라운드 작업 \\(대화 블로킹 없음\\)*\n"
         "/task \\<지시\\> \\- 독립 세션으로 작업 실행\n"
         "/taskstatus \\- 실행 중인 작업 목록\n"
         "/taskcancel \\[id\\] \\- 작업 취소\n\n"
         "⚙️ *시스템*\n"
-        "/new \\- 새 대화 시작 \\+ AI 선택 \\(Claude/Gemini\\)\n"
+        "/new \\- 새 대화 시작\n"
         "/status \\- 시스템 상태\n"
         "/logs \\<id\\> \\[lines\\] \\- 로그 조회\n"
         "/setmodel \\<id\\> \\<model\\> \\- 모델 변경\n"
@@ -117,22 +120,11 @@ async def setmodel_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> No
 
 
 async def new_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """새 대화 시작 - AI provider 선택 키보드 표시"""
+    """새 대화 시작 - 현재 Claude 세션을 종료하고 새로 시작"""
     if not await _check_allowed(update, ctx):
         return
-    from src.telegram.keyboards import ai_select_keyboard
-    mgr = get_manager()
-    current = mgr.provider
-    text = (
-        f"🆕 *새 대화 시작*\n\n"
-        f"현재: {current.display_name()}\n\n"
-        f"사용할 AI를 선택하세요:"
-    )
-    await update.message.reply_text(
-        text,
-        parse_mode="Markdown",
-        reply_markup=ai_select_keyboard(current),
-    )
+    await session_mod.new_session()
+    await update.message.reply_text("🆕 새 대화를 시작했습니다.")
 
 
 def _split_message(text: str, max_length: int = 3000) -> list[str]:
@@ -181,7 +173,7 @@ async def _process_message(
     ack_message_id: int | None,
 ) -> None:
     """실제 Claude 처리 로직 - MessageQueue 워커에서 호출됨"""
-    from telegram import Update as TGUpdate, Bot
+    from telegram import Update as TGUpdate
 
     update = TGUpdate.de_json(update_data, bot)
 
@@ -277,6 +269,55 @@ async def _process_message(
         typing_task.cancel()
 
 
+async def _run_task(
+    task_id: str,
+    prompt: str,
+    chat_id: int,
+    orig_msg_id: int,
+    bot,
+) -> None:
+    """백그라운드 작업 실행 - 독립 Claude 세션 사용"""
+    from src.shared.ai_session import ClaudeSession
+
+    session = ClaudeSession()
+    result: str = ""
+    error: str | None = None
+    try:
+        await session.start()
+        result = await session.ask(prompt, timeout=1800)
+    except asyncio.CancelledError:
+        error = "취소됨"
+    except Exception as e:
+        error = str(e)
+        logger.exception("백그라운드 작업 실패: id=%s", task_id)
+    finally:
+        await session.stop()
+        _task_sessions.pop(task_id, None)
+
+    if error and error != "취소됨":
+        await bot.send_message(
+            chat_id=chat_id,
+            text=f"❌ *작업 실패* (`{task_id}`)\n\n{error[:500]}",
+            parse_mode="Markdown",
+            reply_to_message_id=orig_msg_id,
+        )
+    elif error == "취소됨":
+        await bot.send_message(
+            chat_id=chat_id,
+            text=f"🚫 *작업 취소됨* (`{task_id}`)",
+            parse_mode="Markdown",
+            reply_to_message_id=orig_msg_id,
+        )
+    else:
+        chunks = _split_message(result or "(결과 없음)")
+        for chunk in chunks:
+            await bot.send_message(
+                chat_id=chat_id,
+                text=chunk,
+                reply_to_message_id=orig_msg_id,
+            )
+
+
 async def task_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """/task <지시> - 독립 작업 세션으로 백그라운드 실행 (메인 대화 블로킹 없음)"""
     if not await _check_allowed(update, ctx):
@@ -298,41 +339,16 @@ async def task_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         )
         return
 
-    import uuid
-    from src.shared.ai_session import get_manager
-
     task_id = uuid.uuid4().hex[:8]
     chat_id = update.effective_chat.id
     bot = ctx.bot
     orig_msg_id = update.message.message_id
 
-    # 완료 콜백 - 텔레그램으로 결과 전송
-    async def on_done(tid: str, result: str, error: str | None) -> None:
-        if error and error != "취소됨":
-            await bot.send_message(
-                chat_id=chat_id,
-                text=f"❌ *작업 실패* (`{tid}`)\n\n{error[:500]}",
-                parse_mode="Markdown",
-                reply_to_message_id=orig_msg_id,
-            )
-        elif error == "취소됨":
-            await bot.send_message(
-                chat_id=chat_id,
-                text=f"🚫 *작업 취소됨* (`{tid}`)",
-                parse_mode="Markdown",
-                reply_to_message_id=orig_msg_id,
-            )
-        else:
-            chunks = _split_message(result or "(결과 없음)")
-            for chunk in chunks:
-                await bot.send_message(
-                    chat_id=chat_id,
-                    text=chunk,
-                    reply_to_message_id=orig_msg_id,
-                )
-
-    mgr = get_manager()
-    mgr.task_sessions.run(task_id=task_id, prompt=prompt, on_done=on_done)
+    task = asyncio.create_task(
+        _run_task(task_id, prompt, chat_id, orig_msg_id, bot),
+        name=f"task-{task_id}",
+    )
+    _task_sessions[task_id] = task
 
     await update.message.reply_text(
         f"⚡ *작업 시작됨* (`{task_id}`)\n\n"
@@ -348,24 +364,25 @@ async def taskcancel_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> 
     if not await _check_allowed(update, ctx):
         return
 
-    from src.shared.ai_session import get_manager
-
     args = ctx.args or []
-    mgr = get_manager()
 
     if not args:
-        active = mgr.task_sessions.list_active()
+        active = [tid for tid, t in _task_sessions.items() if not t.done()]
         if not active:
             await update.message.reply_text("ℹ️ 실행 중인 작업이 없습니다.")
             return
         for tid in active:
-            await mgr.task_sessions.cancel(tid)
-        await update.message.reply_text(f"🚫 {len(active)}개 작업 취소됨: {', '.join(f'`{t}`' for t in active)}", parse_mode="Markdown")
+            _task_sessions[tid].cancel()
+        await update.message.reply_text(
+            f"🚫 {len(active)}개 작업 취소됨: {', '.join(f'`{t}`' for t in active)}",
+            parse_mode="Markdown",
+        )
         return
 
     task_id = args[0]
-    cancelled = await mgr.task_sessions.cancel(task_id)
-    if cancelled:
+    task = _task_sessions.get(task_id)
+    if task and not task.done():
+        task.cancel()
         await update.message.reply_text(f"🚫 취소 요청됨: `{task_id}`", parse_mode="Markdown")
     else:
         await update.message.reply_text(f"❌ 작업 없음 또는 이미 완료: `{task_id}`", parse_mode="Markdown")
@@ -376,17 +393,14 @@ async def taskstatus_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> 
     if not await _check_allowed(update, ctx):
         return
 
-    from src.shared.ai_session import get_manager
-
-    mgr = get_manager()
-    active = mgr.task_sessions.list_active()
+    active = [(tid, t) for tid, t in _task_sessions.items() if not t.done()]
 
     if not active:
         await update.message.reply_text("📭 실행 중인 작업이 없습니다.")
         return
 
     lines = [f"⚡ *실행 중인 작업 {len(active)}개*\n"]
-    for tid in active:
+    for tid, _ in active:
         lines.append(f"• `{tid}` - 실행 중")
     lines.append(f"\n취소: `/taskcancel <id>`")
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")

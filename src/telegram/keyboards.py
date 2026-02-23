@@ -3,7 +3,6 @@ from __future__ import annotations
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from src.shared.models import Instance, InstanceStatus, Task, TaskStatus
-from src.shared.ai_session import AIProvider
 
 _STATUS_EMOJI = {
     InstanceStatus.IDLE: "\u2b55",
@@ -51,20 +50,6 @@ def confirm_keyboard(action: str, target_id: str) -> InlineKeyboardMarkup:
         ]
     ])
 
-
-def ai_select_keyboard(current: AIProvider) -> InlineKeyboardMarkup:
-    """AI provider 선택 인라인 키보드"""
-    def _btn(provider: AIProvider) -> InlineKeyboardButton:
-        label = provider.display_name()
-        if provider == current:
-            label = "✅ " + label  # 현재 선택 표시
-        return InlineKeyboardButton(label, callback_data=f"ai_select:{provider.value}")
-
-    return InlineKeyboardMarkup([
-        [_btn(AIProvider.CLAUDE)],
-        [_btn(AIProvider.GEMINI)],
-        [InlineKeyboardButton("❌ 취소", callback_data="cancel")],
-    ])
 
 
 def task_list_keyboard(tasks: list[Task]) -> InlineKeyboardMarkup:

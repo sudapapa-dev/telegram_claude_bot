@@ -47,8 +47,6 @@ async def _async_main(stop_event: asyncio.Event) -> None:
         model=settings.default_model or None,
         working_dir=settings.claude_workspace or None,
         scripts_dir=str(scripts_dir) if scripts_dir.exists() else None,
-        gemini_path=settings.gemini_path,
-        gemini_model=settings.gemini_model or None,
     )
 
     # 대화 이력 스토어 초기화

@@ -6,7 +6,7 @@ requires-python = ">=3.11"
 dependencies = [
     "python-telegram-bot>=21.0",
     "pydantic>=2.0",
-    "pydantic-settings>=2.0",
+    "pydantic-settings>=2.0,<2.13",
     "aiosqlite>=0.20.0",
     "structlog>=24.0",
     "psutil>=6.0",
