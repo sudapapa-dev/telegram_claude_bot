@@ -1,4 +1,4 @@
-# Claude Control Tower
+# telegram_claude_bot
 
 ## Project Overview
 Claude Code Orchestration System - 텔레그램을 통해 다수의 Claude Code 인스턴스를 원격 제어하고 모니터링하는 시스템.
@@ -41,7 +41,7 @@ Claude Code Orchestration System - 텔레그램을 통해 다수의 Claude Code 
 
 ## Project Structure
 ```
-claude_controltower/
+telegram_claude_bot/
 ├── CLAUDE.md
 ├── .claude/agents/              # 에이전트 팀 정의
 ├── src/                         # 모든 소스 코드는 src/ 안에만
@@ -65,7 +65,7 @@ claude_controltower/
 ├── tests/
 ├── .env.example
 ├── pyproject.toml
-└── controltower.spec            # PyInstaller exe 빌드
+└── deploy/windows/controltower.spec  # PyInstaller exe 빌드
 ```
 
 ## Telegram Commands
@@ -91,8 +91,8 @@ python -m src.main
 ### EXE 빌드
 ```bash
 pip install pyinstaller
-pyinstaller controltower.spec --clean --noconfirm
-# dist/controltower.exe 생성됨 → 같은 폴더에 .env 파일 필요
+pyinstaller deploy/windows/controltower.spec --clean --noconfirm
+# dist/telegram_claude_bot.exe 생성됨 → 같은 폴더에 .env 파일 필요
 ```
 
 ## Coding Conventions

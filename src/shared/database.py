@@ -16,7 +16,7 @@ CREATE TABLE IF NOT EXISTS instances (
     working_dir TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'stopped',
     api_key TEXT NOT NULL DEFAULT '',
-    model TEXT NOT NULL DEFAULT 'claude-sonnet-4-20250514',
+    model TEXT NOT NULL DEFAULT 'claude-sonnet-4-6',
     created_at TEXT NOT NULL,
     current_task_id TEXT
 );
@@ -44,11 +44,18 @@ CREATE TABLE IF NOT EXISTS tasks (
 """
 
 
+def _require_db(db: aiosqlite.Connection | None) -> aiosqlite.Connection:
+    """DB 초기화 여부를 검사하고 연결 객체를 반환"""
+    if db is None:
+        raise RuntimeError("DB가 초기화되지 않았습니다. initialize()를 먼저 호출하세요.")
+    return db
+
+
 class Database:
     """SQLite 비동기 데이터베이스"""
 
     def __init__(self, db_path: str) -> None:
-        self._path = db_path
+        self._path = str(Path(db_path).resolve())
         self._db: aiosqlite.Connection | None = None
 
     async def initialize(self) -> None:
@@ -67,40 +74,40 @@ class Database:
     # ── Instances ──
 
     async def save_instance(self, inst: Instance) -> None:
-        assert self._db
-        await self._db.execute(
+        db = _require_db(self._db)
+        await db.execute(
             """INSERT OR REPLACE INTO instances
                (id, name, working_dir, status, api_key, model, created_at, current_task_id)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
             (inst.id, inst.name, inst.working_dir, inst.status.value,
              inst.api_key, inst.model, inst.created_at.isoformat(), inst.current_task_id),
         )
-        await self._db.commit()
+        await db.commit()
 
     async def get_instance(self, instance_id: str) -> Instance | None:
-        assert self._db
-        async with self._db.execute(
+        db = _require_db(self._db)
+        async with db.execute(
             "SELECT * FROM instances WHERE id = ?", (instance_id,)
         ) as cur:
             row = await cur.fetchone()
             return self._row_to_instance(row) if row else None
 
     async def get_all_instances(self) -> list[Instance]:
-        assert self._db
-        async with self._db.execute("SELECT * FROM instances ORDER BY created_at") as cur:
+        db = _require_db(self._db)
+        async with db.execute("SELECT * FROM instances ORDER BY created_at") as cur:
             return [self._row_to_instance(r) for r in await cur.fetchall()]
 
     async def delete_instance(self, instance_id: str) -> None:
-        assert self._db
-        await self._db.execute("DELETE FROM tasks WHERE instance_id = ?", (instance_id,))
-        await self._db.execute("DELETE FROM instances WHERE id = ?", (instance_id,))
-        await self._db.commit()
+        db = _require_db(self._db)
+        await db.execute("DELETE FROM tasks WHERE instance_id = ?", (instance_id,))
+        await db.execute("DELETE FROM instances WHERE id = ?", (instance_id,))
+        await db.commit()
 
     # ── Tasks ──
 
     async def save_task(self, task: Task) -> None:
-        assert self._db
-        await self._db.execute(
+        db = _require_db(self._db)
+        await db.execute(
             """INSERT OR REPLACE INTO tasks
                (id, instance_id, prompt, status, priority, created_at,
                 started_at, completed_at, result, error)
@@ -111,25 +118,25 @@ class Database:
              task.completed_at.isoformat() if task.completed_at else None,
              task.result, task.error),
         )
-        await self._db.commit()
+        await db.commit()
 
     async def get_task(self, task_id: str) -> Task | None:
-        assert self._db
-        async with self._db.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)) as cur:
+        db = _require_db(self._db)
+        async with db.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)) as cur:
             row = await cur.fetchone()
             return self._row_to_task(row) if row else None
 
     async def get_tasks_by_instance(self, instance_id: str, limit: int = 20) -> list[Task]:
-        assert self._db
-        async with self._db.execute(
+        db = _require_db(self._db)
+        async with db.execute(
             "SELECT * FROM tasks WHERE instance_id = ? ORDER BY created_at DESC LIMIT ?",
             (instance_id, limit),
         ) as cur:
             return [self._row_to_task(r) for r in await cur.fetchall()]
 
     async def get_pending_task_count(self) -> int:
-        assert self._db
-        async with self._db.execute(
+        db = _require_db(self._db)
+        async with db.execute(
             "SELECT COUNT(*) FROM tasks WHERE status IN ('pending', 'running')"
         ) as cur:
             row = await cur.fetchone()
@@ -139,17 +146,23 @@ class Database:
 
     async def save_chat_messages(self, messages: list[ChatMessage]) -> None:
         """메시지 목록을 DB에 저장"""
-        assert self._db
-        await self._db.executemany(
+        db = _require_db(self._db)
+        await db.executemany(
             "INSERT OR IGNORE INTO chat_history (id, role, content, created_at) VALUES (?, ?, ?, ?)",
             [(m.id, m.role, m.content, m.created_at.isoformat()) for m in messages],
         )
-        await self._db.commit()
+        await db.commit()
+
+    async def clear_chat_history(self) -> None:
+        """chat_history 테이블 전체 삭제"""
+        db = _require_db(self._db)
+        await db.execute("DELETE FROM chat_history")
+        await db.commit()
 
     async def get_chat_history(self, limit: int = 50, offset: int = 0) -> list[ChatMessage]:
         """DB에서 대화 이력 조회 (최신순)"""
-        assert self._db
-        async with self._db.execute(
+        db = _require_db(self._db)
+        async with db.execute(
             "SELECT * FROM chat_history ORDER BY created_at DESC LIMIT ? OFFSET ?",
             (limit, offset),
         ) as cur:

@@ -1,0 +1,5 @@
+# Google Gemini File Search API
+google-genai>=0.5.0
+
+# 기본 유틸리티
+pathlib2>=2.3.0

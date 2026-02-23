@@ -26,7 +26,7 @@ class EventBus:
 
     async def emit(self, event: str, data: Any = None) -> None:
         """이벤트 발행"""
-        for callback in self._listeners.get(event, []):
+        for callback in list(self._listeners.get(event, [])):
             try:
                 await callback(data)
             except Exception:

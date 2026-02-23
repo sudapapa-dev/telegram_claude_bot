@@ -1,4 +1,4 @@
-# Claude Control Tower
+# telegram_claude_bot
 
 텔레그램을 통해 다수의 Claude Code 인스턴스를 원격 제어하고 모니터링하는 시스템.
 
@@ -24,8 +24,8 @@ python -m src.main
 
 ```bash
 pip install pyinstaller
-pyinstaller controltower.spec --clean --noconfirm
-# dist/controltower.exe 생성 → 같은 폴더에 .env 파일 필요
+pyinstaller deploy/windows/controltower.spec --clean --noconfirm
+# dist/telegram_claude_bot.exe 생성 → 같은 폴더에 .env 파일 필요
 ```
 
 ---
@@ -138,7 +138,7 @@ ALLOWED_CHAT_IDS=[123456789]
 MAX_CONCURRENT_INSTANCES=5
 TASK_TIMEOUT_SECONDS=300
 CLAUDE_CODE_PATH=claude
-DATABASE_PATH=controltower.db
+DATABASE_PATH=telegram_claude_bot.db
 ```
 
 | 변수 | 필수 | 설명 |
@@ -148,6 +148,6 @@ DATABASE_PATH=controltower.db
 | `MAX_CONCURRENT_INSTANCES` | - | 최대 동시 실행 인스턴스 수 (기본: 5) |
 | `TASK_TIMEOUT_SECONDS` | - | 작업 타임아웃 (초, 기본: 300) |
 | `CLAUDE_CODE_PATH` | - | Claude Code CLI 경로 (기본: `claude`) |
-| `DATABASE_PATH` | - | SQLite DB 파일 경로 (기본: `controltower.db`) |
+| `DATABASE_PATH` | - | SQLite DB 파일 경로 (기본: `telegram_claude_bot.db`) |
 
 > **보안**: API 키와 봇 토큰은 `.env` 파일로만 관리. 텔레그램 명령어를 통한 변경 불가.

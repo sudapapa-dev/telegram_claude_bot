@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+from collections import deque
 from collections.abc import AsyncIterator
 from pathlib import Path
 
@@ -27,8 +28,7 @@ class ClaudeCodeProcess:
         self.model = model
         self.claude_path = claude_path
         self.process: asyncio.subprocess.Process | None = None
-        self._log_buffer: list[str] = []
-        self._max_log_lines = 500
+        self._log_buffer: deque[str] = deque(maxlen=500)
 
     @property
     def is_running(self) -> bool:
@@ -36,7 +36,8 @@ class ClaudeCodeProcess:
 
     def get_recent_logs(self, limit: int = 50) -> list[str]:
         """최근 로그 라인 반환"""
-        return self._log_buffer[-limit:]
+        buf = list(self._log_buffer)
+        return buf[-limit:]
 
     async def execute(self, prompt: str, timeout: int = 300) -> str:
         """Claude Code에 프롬프트를 전달하고 결과 반환"""
@@ -65,7 +66,11 @@ class ClaudeCodeProcess:
             )
         except asyncio.TimeoutError:
             self.process.terminate()
-            await self.process.wait()
+            try:
+                await asyncio.wait_for(self.process.wait(), timeout=5)
+            except asyncio.TimeoutError:
+                self.process.kill()
+                await self.process.wait()
             raise TimeoutError(f"작업 타임아웃 ({timeout}초 초과)")
 
         stdout = stdout_bytes.decode(errors="replace")
@@ -77,7 +82,8 @@ class ClaudeCodeProcess:
             self._append_log(f"[stderr] {line}")
 
         if self.process.returncode != 0:
-            raise RuntimeError(stderr or f"종료 코드: {self.process.returncode}")
+            err_msg = stderr.strip()[:500] if stderr.strip() else f"종료 코드: {self.process.returncode}"
+            raise RuntimeError(err_msg)
 
         return self._parse_output(stdout)
 
@@ -132,8 +138,6 @@ class ClaudeCodeProcess:
 
     def _append_log(self, line: str) -> None:
         self._log_buffer.append(line)
-        if len(self._log_buffer) > self._max_log_lines:
-            self._log_buffer = self._log_buffer[-self._max_log_lines:]
 
     @staticmethod
     def _parse_output(raw: str) -> str:

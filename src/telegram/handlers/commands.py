@@ -3,8 +3,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import tempfile
 import uuid
+from typing import TYPE_CHECKING
 
 from telegram import Update
 from telegram.ext import ContextTypes
@@ -13,10 +15,36 @@ from src.orchestrator.manager import InstanceManager
 from src.shared import ai_session as session_mod
 from src.shared.chat_history import ChatHistoryStore
 
+if TYPE_CHECKING:
+    from src.telegram.bot import InFlightRegistry
+
 logger = logging.getLogger(__name__)
 
-# 실행 중인 백그라운드 작업 목록 {task_id: asyncio.Task}
-_task_sessions: dict[str, asyncio.Task] = {}
+# 응답 헤더 파싱 패턴: [MSG_HEADER:xxxxxxxx]
+_HEADER_RE = re.compile(r"^\[MSG_HEADER:([a-f0-9]{8,16})\]\n?", re.MULTILINE)
+
+
+def _inject_header_instruction(prompt: str, msg_queue_id: str) -> str:
+    """프롬프트 끝에 응답 헤더 포함 지시문 추가"""
+    return (
+        f"{prompt}\n\n"
+        f"---\n"
+        f"[SYSTEM] 응답의 첫 줄은 반드시 다음 형식으로 시작하세요 (다른 내용 없이):\n"
+        f"[MSG_HEADER:{msg_queue_id}]\n"
+        f"이 헤더 다음 줄부터 실제 응답을 작성하세요."
+    )
+
+
+def _extract_header(response: str) -> tuple[str | None, str]:
+    """응답에서 MSG_HEADER 추출. (msg_queue_id, 헤더 제거된 응답) 반환."""
+    m = _HEADER_RE.match(response.lstrip())
+    if m:
+        return m.group(1), response[response.index(m.group(0)) + len(m.group(0)):].strip()
+    return None, response
+
+# 실행 중인 백그라운드 작업 목록 {chat_id: {task_id: asyncio.Task}}
+# 사용자별로 격리하여 다른 사용자의 작업을 취소할 수 없도록 함
+_task_sessions: dict[int, dict[str, asyncio.Task]] = {}
 
 
 def _mgr(ctx: ContextTypes.DEFAULT_TYPE) -> InstanceManager:
@@ -49,7 +77,7 @@ async def start_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not await _check_allowed(update, ctx):
         return
     text = (
-        "*Claude Control Tower*\n\n"
+        "*telegram_claude_bot*\n\n"
         "메시지를 입력하면 Claude가 응답합니다\\.\n\n"
         "⚡ *백그라운드 작업 \\(대화 블로킹 없음\\)*\n"
         "/task \\<지시\\> \\- 독립 세션으로 작업 실행\n"
@@ -57,6 +85,7 @@ async def start_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         "/taskcancel \\[id\\] \\- 작업 취소\n\n"
         "⚙️ *시스템*\n"
         "/new \\- 새 대화 시작\n"
+        "/clean \\- 대화 이력 및 캐시 초기화\n"
         "/status \\- 시스템 상태\n"
         "/logs \\<id\\> \\[lines\\] \\- 로그 조회\n"
         "/setmodel \\<id\\> \\<model\\> \\- 모델 변경\n"
@@ -68,7 +97,9 @@ async def start_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 async def status_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not await _check_allowed(update, ctx):
         return
+    from src.shared import ai_session as session_mod
     s = await _mgr(ctx).get_status()
+    pool = session_mod.get_pool_status()
     text = (
         f"\U0001f4ca *시스템 상태*\n\n"
         f"인스턴스: {s.total}개\n"
@@ -76,7 +107,10 @@ async def status_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
         f"  \u2b55 대기: {s.idle}\n"
         f"  \U0001f534 중지: {s.stopped}\n"
         f"  \u26a0\ufe0f 에러: {s.error}\n\n"
-        f"대기 작업: {s.pending_tasks}개"
+        f"대기 작업: {s.pending_tasks}개\n\n"
+        f"Claude 세션 풀: {pool['total']}/{pool['pool_size']}개\n"
+        f"  \U0001f7e2 idle: {pool['idle']}\n"
+        f"  \U0001f7e1 busy: {pool['busy']}"
     )
     await update.message.reply_text(text)
 
@@ -88,7 +122,11 @@ async def logs_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not args:
         await update.message.reply_text("사용법: /logs <instance_id> [lines]")
         return
-    limit = int(args[1]) if len(args) > 1 else 30
+    try:
+        limit = min(int(args[1]), 200) if len(args) > 1 else 30
+    except ValueError:
+        await update.message.reply_text("❌ lines는 숫자여야 합니다.")
+        return
     logs = await _mgr(ctx).get_logs(args[0], limit)
     if not logs:
         await update.message.reply_text("\U0001f4ed 로그가 없습니다.")
@@ -111,11 +149,7 @@ async def setmodel_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> No
     if not inst:
         await update.message.reply_text(f"\u274c 인스턴스 없음: {args[0]}")
         return
-    inst.model = args[1]
-    await mgr._db.save_instance(inst)
-    proc = mgr._processes.get(args[0])
-    if proc:
-        proc.model = args[1]
+    await mgr.update_model(args[0], args[1])
     await update.message.reply_text(f"\U0001f504 모델 변경됨: {inst.name} \u2192 {args[1]}")
 
 
@@ -161,6 +195,8 @@ async def chat_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         chat_id=update.effective_chat.id,
         message_id=update.message.message_id,
         ack_message_id=None,
+        msg_queue_id=None,
+        registry=None,
     )
 
 
@@ -171,22 +207,28 @@ async def _process_message(
     chat_id: int,
     message_id: int,
     ack_message_id: int | None,
+    msg_queue_id: str | None = None,
+    registry: "InFlightRegistry | None" = None,
 ) -> None:
-    """실제 Claude 처리 로직 - MessageQueue 워커에서 호출됨"""
+    """실제 Claude 처리 로직 - MessageQueue 워커에서 호출됨.
+
+    msg_queue_id가 있으면 프롬프트에 헤더 지시문을 주입하고,
+    응답에서 헤더를 파싱하여 registry에서 원본 요청을 찾아 응답 전송.
+    registry가 None이면 (레거시 경로) 현재 컨텍스트로 직접 응답.
+    """
     from telegram import Update as TGUpdate
 
     update = TGUpdate.de_json(update_data, bot)
 
     async def _delete_ack() -> None:
-        """수신 확인 메시지 삭제"""
         if ack_message_id:
             try:
                 await bot.delete_message(chat_id=chat_id, message_id=ack_message_id)
             except Exception:
                 pass
 
-    async def _send_reply(reply: str) -> None:
-        """응답 전송 (3000자 초과 시 파일)"""
+    async def _send_to(target_bot, target_chat_id: int, target_msg_id: int, reply: str) -> None:
+        """지정된 chat/message로 응답 전송 (3000자 초과 시 파일)"""
         if len(reply) > 3000:
             with tempfile.NamedTemporaryFile(
                 mode="w", suffix=".md", delete=False, encoding="utf-8"
@@ -195,23 +237,62 @@ async def _process_message(
                 tmp_path = f.name
             try:
                 with open(tmp_path, "rb") as f:
-                    await bot.send_document(
-                        chat_id=chat_id,
+                    await target_bot.send_document(
+                        chat_id=target_chat_id,
                         document=f,
                         filename="response.md",
                         caption="📄 응답이 길어 파일로 전송합니다.",
-                        reply_to_message_id=message_id,
+                        reply_to_message_id=target_msg_id,
                     )
             finally:
                 os.unlink(tmp_path)
         else:
             chunks = _split_message(reply)
             for chunk in chunks:
-                await bot.send_message(
-                    chat_id=chat_id,
+                await target_bot.send_message(
+                    chat_id=target_chat_id,
                     text=chunk,
-                    reply_to_message_id=message_id,
+                    reply_to_message_id=target_msg_id,
                 )
+
+    async def _send_reply(reply: str) -> None:
+        """현재 컨텍스트로 응답 전송"""
+        await _send_to(bot, chat_id, message_id, reply)
+
+    async def _dispatch_reply(raw_reply: str) -> None:
+        """헤더 파싱 후 registry 매칭 또는 폴백으로 응답 전송.
+        registry가 None이면 현재 컨텍스트로 직접 전송.
+        """
+        if registry is None or msg_queue_id is None:
+            # 레거시 경로: 헤더 없이 현재 컨텍스트로 전송
+            await _send_reply(raw_reply)
+            return
+
+        extracted_id, clean_reply = _extract_header(raw_reply)
+
+        if extracted_id:
+            record = registry.remove(extracted_id)
+            if record:
+                logger.info("응답 매칭 성공: msg_id=%s → chat_id=%s", extracted_id, record.chat_id)
+                # registry에서 찾은 ack 메시지 삭제
+                if record.ack_message_id:
+                    try:
+                        await record.bot.delete_message(
+                            chat_id=record.chat_id, message_id=record.ack_message_id
+                        )
+                    except Exception:
+                        pass
+                await _send_to(record.bot, record.chat_id, record.message_id, clean_reply)
+            else:
+                # 이미 처리됐거나 레코드 없음 → 폴백
+                logger.warning("registry에 레코드 없음: msg_id=%s, 폴백 전송", extracted_id)
+                await _send_reply(clean_reply)
+        else:
+            # 헤더 파싱 실패 → msg_queue_id로 직접 제거 후 폴백
+            logger.warning("헤더 파싱 실패: msg_queue_id=%s, 폴백 전송", msg_queue_id)
+            registry.remove(msg_queue_id)
+            await _delete_ack()
+            await _send_reply(raw_reply)
 
     # typing 액션 주기적 갱신
     async def keep_typing() -> None:
@@ -237,32 +318,41 @@ async def _process_message(
 
         typing_task = asyncio.create_task(keep_typing())
         try:
-            prompt = f"[이미지 첨부됨: {tmp_path}]\n{caption}"
-            reply = await session_mod.ask(prompt)
-            await _delete_ack()
-            await _send_reply(reply)
+            base_prompt = f"[이미지 첨부됨: image.jpg]\n{caption}"
+            prompt = _inject_header_instruction(base_prompt, msg_queue_id) if msg_queue_id else base_prompt
+            raw_reply = await session_mod.ask(prompt)
+            await _dispatch_reply(raw_reply)
         except Exception as e:
             logger.exception("Claude CLI 오류 (이미지)")
+            if registry and msg_queue_id:
+                registry.remove(msg_queue_id)
             await _delete_ack()
             await bot.send_message(chat_id=chat_id, text=f"❌ 오류: {e}", reply_to_message_id=message_id)
         finally:
             typing_task.cancel()
-            os.unlink(tmp_path)
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
         return
 
     # 텍스트 메시지 처리
     prompt = update.message.text if update.message else None
     if not prompt:
+        if registry and msg_queue_id:
+            registry.remove(msg_queue_id)
         await _delete_ack()
         return
 
     typing_task = asyncio.create_task(keep_typing())
     try:
-        reply = await session_mod.ask(prompt)
-        await _delete_ack()
-        await _send_reply(reply)
+        full_prompt = _inject_header_instruction(prompt, msg_queue_id) if msg_queue_id else prompt
+        raw_reply = await session_mod.ask(full_prompt)
+        await _dispatch_reply(raw_reply)
     except Exception as e:
         logger.exception("Claude CLI 오류")
+        if registry and msg_queue_id:
+            registry.remove(msg_queue_id)
         await _delete_ack()
         await bot.send_message(chat_id=chat_id, text=f"❌ 오류: {e}", reply_to_message_id=message_id)
     finally:
@@ -275,6 +365,7 @@ async def _run_task(
     chat_id: int,
     orig_msg_id: int,
     bot,
+    history_store: "ChatHistoryStore | None" = None,
 ) -> None:
     """백그라운드 작업 실행 - 독립 Claude 세션 사용"""
     from src.shared.ai_session import ClaudeSession
@@ -285,6 +376,10 @@ async def _run_task(
     try:
         await session.start()
         result = await session.ask(prompt, timeout=1800)
+        # 대화 이력 저장 (task 접두어로 구분)
+        if history_store is not None:
+            await history_store.append(role="user", content=f"[task:{task_id}] {prompt}")
+            await history_store.append(role="assistant", content=result)
     except asyncio.CancelledError:
         error = "취소됨"
     except Exception as e:
@@ -292,7 +387,8 @@ async def _run_task(
         logger.exception("백그라운드 작업 실패: id=%s", task_id)
     finally:
         await session.stop()
-        _task_sessions.pop(task_id, None)
+        user_tasks = _task_sessions.get(chat_id, {})
+        user_tasks.pop(task_id, None)
 
     if error and error != "취소됨":
         await bot.send_message(
@@ -343,12 +439,13 @@ async def task_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
     bot = ctx.bot
     orig_msg_id = update.message.message_id
+    history_store: ChatHistoryStore | None = ctx.bot_data.get("history_store")
 
     task = asyncio.create_task(
-        _run_task(task_id, prompt, chat_id, orig_msg_id, bot),
+        _run_task(task_id, prompt, chat_id, orig_msg_id, bot, history_store=history_store),
         name=f"task-{task_id}",
     )
-    _task_sessions[task_id] = task
+    _task_sessions.setdefault(chat_id, {})[task_id] = task
 
     await update.message.reply_text(
         f"⚡ *작업 시작됨* (`{task_id}`)\n\n"
@@ -360,19 +457,21 @@ async def task_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def taskcancel_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """/taskcancel [id] - 실행 중인 작업 취소"""
+    """/taskcancel [id] - 실행 중인 작업 취소 (자신의 작업만)"""
     if not await _check_allowed(update, ctx):
         return
 
+    chat_id = update.effective_chat.id
     args = ctx.args or []
+    user_tasks = _task_sessions.get(chat_id, {})
 
     if not args:
-        active = [tid for tid, t in _task_sessions.items() if not t.done()]
+        active = [tid for tid, t in user_tasks.items() if not t.done()]
         if not active:
             await update.message.reply_text("ℹ️ 실행 중인 작업이 없습니다.")
             return
         for tid in active:
-            _task_sessions[tid].cancel()
+            user_tasks[tid].cancel()
         await update.message.reply_text(
             f"🚫 {len(active)}개 작업 취소됨: {', '.join(f'`{t}`' for t in active)}",
             parse_mode="Markdown",
@@ -380,7 +479,7 @@ async def taskcancel_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     task_id = args[0]
-    task = _task_sessions.get(task_id)
+    task = user_tasks.get(task_id)
     if task and not task.done():
         task.cancel()
         await update.message.reply_text(f"🚫 취소 요청됨: `{task_id}`", parse_mode="Markdown")
@@ -389,11 +488,13 @@ async def taskcancel_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> 
 
 
 async def taskstatus_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """/taskstatus - 실행 중인 작업 목록"""
+    """/taskstatus - 실행 중인 작업 목록 (자신의 작업만)"""
     if not await _check_allowed(update, ctx):
         return
 
-    active = [(tid, t) for tid, t in _task_sessions.items() if not t.done()]
+    chat_id = update.effective_chat.id
+    user_tasks = _task_sessions.get(chat_id, {})
+    active = [(tid, t) for tid, t in user_tasks.items() if not t.done()]
 
     if not active:
         await update.message.reply_text("📭 실행 중인 작업이 없습니다.")
@@ -404,6 +505,17 @@ async def taskstatus_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> 
         lines.append(f"• `{tid}` - 실행 중")
     lines.append(f"\n취소: `/taskcancel <id>`")
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
+async def clean_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """대화 이력 및 Claude 세션 캐시 전체 초기화"""
+    if not await _check_allowed(update, ctx):
+        return
+    store: ChatHistoryStore | None = ctx.bot_data.get("history_store")
+    if store:
+        await store.clear()
+    await session_mod.new_session()
+    await update.message.reply_text("🧹 대화 이력과 세션 캐시를 초기화했습니다.")
 
 
 async def history_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:

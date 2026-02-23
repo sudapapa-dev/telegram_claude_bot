@@ -4,6 +4,8 @@ from datetime import datetime, timezone
 from enum import Enum
 from uuid import uuid4
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 
@@ -67,7 +69,7 @@ class InstanceConfig(BaseModel):
 class ChatMessage(BaseModel):
     """Default Claude 대화 메시지"""
     id: str = Field(default_factory=_new_id)
-    role: str  # "user" | "assistant"
+    role: Literal["user", "assistant"]
     content: str
     created_at: datetime = Field(default_factory=_utcnow)
 

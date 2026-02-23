@@ -1,4 +1,4 @@
-"""Claude Control Tower - 진입점"""
+"""telegram_claude_bot - 진입점"""
 from __future__ import annotations
 
 import asyncio
@@ -30,7 +30,7 @@ def setup_logging() -> None:
 
 async def _async_main(stop_event: asyncio.Event) -> None:
     """봇 및 오케스트레이터 실행 (asyncio 루프 안)"""
-    log = logging.getLogger("controltower")
+    log = logging.getLogger("telegram_claude_bot")
 
     settings = Settings()
     event_bus = EventBus()
@@ -47,25 +47,31 @@ async def _async_main(stop_event: asyncio.Event) -> None:
         model=settings.default_model or None,
         working_dir=settings.claude_workspace or None,
         scripts_dir=str(scripts_dir) if scripts_dir.exists() else None,
+        pool_size=settings.session_pool_size,
+        system_prompt=settings.system_prompt or "",
     )
 
-    # 대화 이력 스토어 초기화
-    history_store = ChatHistoryStore(json_path=base_dir / "chat_history.json", db=db)
+    # 대화 이력 스토어 초기화 (Docker: /app/data, 로컬: DB와 같은 디렉토리)
+    data_dir = Path(settings.database_path).parent
+    history_store = ChatHistoryStore(json_path=data_dir / "chat_history.json", db=db)
     await history_store.load()
     ai_session.set_history_store(history_store)
+
+    settings.warn_if_open_access()
 
     orchestrator = InstanceManager(
         db=db, event_bus=event_bus,
         claude_path=settings.claude_code_path,
-        max_concurrent=settings.allowed_users,
+        max_concurrent=settings.max_concurrent,
     )
     await orchestrator.start()
 
     bot = ControlTowerBot(
-        token=settings.telegram_bot_token,
+        token=settings.telegram_bot_token.get_secret_value(),
         orchestrator=orchestrator,
         allowed_users=settings.telegram_chat_id,
         history_store=history_store,
+        session_pool_size=settings.session_pool_size,
     )
     bot.setup_notifications(event_bus)
 
@@ -76,7 +82,7 @@ async def _async_main(stop_event: asyncio.Event) -> None:
         except NotImplementedError:
             pass  # Windows
 
-    log.info("Claude Control Tower 시작")
+    log.info("telegram_claude_bot 시작")
     await bot.run()
 
     try:
@@ -104,8 +110,8 @@ def entry() -> None:
         os.chdir(os.path.dirname(sys.executable))
 
     setup_logging()
-    log = logging.getLogger("controltower")
-    log.info("Claude Control Tower 시작 (트레이 없음 모드)")
+    log = logging.getLogger("telegram_claude_bot")
+    log.info("telegram_claude_bot 시작 (트레이 없음 모드)")
 
     try:
         asyncio.run(_async_main(asyncio.Event()))

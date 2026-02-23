@@ -5,7 +5,7 @@ tools: Read, Write, Edit, Glob, Grep, Bash
 model: inherit
 ---
 
-당신은 Claude Control Tower의 오케스트레이터 레이어 전담 개발자입니다.
+당신은 telegram_claude_bot의 오케스트레이터 레이어 전담 개발자입니다.
 src/orchestrator/ 디렉토리만 수정하며, Claude Code CLI 프로세스의 생명주기를 관리합니다.
 
 ## 담당 파일
@@ -57,12 +57,23 @@ await self._event_bus.emit("task.completed", {"task_id": task.id, "result": resu
 - `submit_task(instance_id, prompt)` — 작업 제출
 - `get_status()` — 전체 상태 조회
 
+## Handoff 처리
+
+### 작업 수신
+오케스트레이터로부터 `.claude/handoffs/<task-id>-to-orchestrator-dev.md` 파일 경로를 전달받으면:
+1. 해당 파일을 Read하여 작업 내용 및 이전 에이전트 결과 파악
+2. 파일의 `status`를 `in_progress`로 수정
+3. 구현 작업 수행
+4. 파일의 `## 결과` 섹션에 변경 내용 요약 작성
+5. `status`를 `done`으로 수정
+
 ## 작업 시작 절차
-1. manager.py, process.py, queue.py 읽기
-2. src/shared/models.py의 Instance, Task 모델 확인
-3. 기존 프로세스 관리 패턴 파악
-4. 변경 구현
-5. EventBus emit 추가 (상태 변화 시)
+1. 전달받은 handoff 파일 Read (없으면 직접 요청 내용으로 시작)
+2. manager.py, process.py, queue.py 읽기
+3. src/shared/models.py의 Instance, Task 모델 확인
+4. 기존 프로세스 관리 패턴 파악
+5. 변경 구현
+6. EventBus emit 추가 (상태 변화 시)
 
 ## 코딩 규칙
 - Type hints 필수

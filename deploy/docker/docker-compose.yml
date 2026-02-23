@@ -1,31 +1,54 @@
 version: '3.8'
 
 services:
-  controltower:
-    build: .
-    image: claude-controltower:latest
-    container_name: claude_controltower
+  telegram_claude_bot:
+    build:
+      # build context를 프로젝트 루트로 설정
+      # pyproject.toml과 src/ 폴더가 루트에 있으므로 반드시 루트 기준이어야 함
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    image: telegram_claude_bot:latest
+    container_name: telegram_claude_bot
     restart: unless-stopped
 
+    # .env 파일이 있으면 환경변수로 로드 (없어도 오류 없음)
+    env_file:
+      - path: .env
+        required: false
+
     environment:
+      # 필수 환경변수 (.env 파일 또는 호스트 환경변수에서 주입)
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
       - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
+
+      # Claude 설정
       - CLAUDE_CODE_PATH=claude
       - DEFAULT_MODEL=${DEFAULT_MODEL:-claude-sonnet-4-6}
       - CLAUDE_WORKSPACE=/app/workspace
-      - DATABASE_PATH=/app/data/controltower.db
-      - ALLOWED_USERS=${ALLOWED_USERS:-3}
+
+      # 시스템 프롬프트 (단일 또는 다중 설정 가능)
+      - SYSTEM_PROMPT=${SYSTEM_PROMPT:-}
+      - SYSTEM_PROMPT_1=${SYSTEM_PROMPT_1:-}
+      - SYSTEM_PROMPT_2=${SYSTEM_PROMPT_2:-}
+      - SYSTEM_PROMPT_3=${SYSTEM_PROMPT_3:-}
+
+      # 동시 처리 설정 (인스턴스 + 세션 풀 공용)
+      - MAX_CONCURRENT=${MAX_CONCURRENT:-3}
+
+      # 데이터 경로 (컨테이너 내부 고정 경로)
+      - DATABASE_PATH=/app/data/.db/telegram_claude_bot.db
 
     volumes:
-      # 데이터 영속성 (DB, 대화 이력)
+      # DB 및 대화 이력 영속화
       - ./data:/app/data
-      # 작업 디렉토리 (코딩 작업용)
+      # Claude Code 작업 디렉토리
       - ./workspace:/app/workspace
-      # Claude 인증 정보 영속화 (appuser 홈 경로에 마운트)
-      # NAS 호스트에 ./claude_auth 폴더 생성 후 .credentials.json 복사 필요
+      # Claude CLI 인증 정보 영속화
+      # 로컬 ~/.claude 내용을 ./claude_auth/ 에 복사한 후 사용
+      # Linux/Mac: cp -r ~/.claude/* ./claude_auth/
+      # Windows:   xcopy %USERPROFILE%\.claude claude_auth\ /E /I
       - ./claude_auth:/home/appuser/.claude
 
-    # NAS에서 컨테이너 로그 확인용
     logging:
       driver: "json-file"
       options:

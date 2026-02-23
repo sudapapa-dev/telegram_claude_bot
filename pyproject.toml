@@ -1,5 +1,5 @@
 [project]
-name = "claude-controltower"
+name = "telegram_claude_bot"
 version = "0.1.0"
 description = "Claude Code Orchestration System - 텔레그램을 통한 Claude Code 원격 제어"
 requires-python = ">=3.11"
@@ -9,8 +9,6 @@ dependencies = [
     "pydantic-settings>=2.0,<2.13",
     "aiosqlite>=0.20.0",
     "structlog>=24.0",
-    "psutil>=6.0",
-    "mss>=9.0",
 ]
 
 [project.optional-dependencies]
@@ -26,7 +24,7 @@ build = [
 ]
 
 [project.scripts]
-controltower = "src.main:entry"
+telegram_claude_bot = "src.main:entry"
 
 [tool.ruff]
 target-version = "py311"

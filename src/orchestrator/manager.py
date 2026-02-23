@@ -37,13 +37,16 @@ class InstanceManager:
 
     async def start(self) -> None:
         await self._queue.start()
+        await self._restore_processes()
         logger.info("InstanceManager 시작")
 
     async def stop(self) -> None:
         await self._queue.stop()
-        for proc in self._processes.values():
-            await proc.abort()
-        self._processes.clear()
+        try:
+            for proc in self._processes.values():
+                await proc.abort()
+        finally:
+            self._processes.clear()
         logger.info("InstanceManager 중지")
 
     # ── Instance CRUD ──
@@ -60,7 +63,7 @@ class InstanceManager:
 
         self._processes[instance.id] = ClaudeCodeProcess(
             instance_id=instance.id, working_dir=wd,
-            api_key=api_key, model=config.model,
+            api_key=config.api_key, model=config.model,
             claude_path=self._claude_path,
         )
         await self._db.save_instance(instance)
@@ -82,6 +85,19 @@ class InstanceManager:
 
     async def get_all_instances(self) -> list[Instance]:
         return await self._db.get_all_instances()
+
+    async def update_model(self, instance_id: str, model: str) -> bool:
+        """인스턴스 모델 변경"""
+        instance = await self._db.get_instance(instance_id)
+        if not instance:
+            return False
+        instance.model = model
+        await self._db.save_instance(instance)
+        proc = self._processes.get(instance_id)
+        if proc:
+            proc.model = model
+        logger.info("모델 변경: id=%s, model=%s", instance_id, model)
+        return True
 
     # ── Task ──
 
@@ -154,6 +170,25 @@ class InstanceManager:
         return count
 
     # ── Internal ──
+
+    async def _restore_processes(self) -> None:
+        """재시작 후 DB 인스턴스를 _processes 딕셔너리에 복원"""
+        instances = await self._db.get_all_instances()
+        for inst in instances:
+            if inst.id not in self._processes:
+                wd = Path(inst.working_dir)
+                self._processes[inst.id] = ClaudeCodeProcess(
+                    instance_id=inst.id, working_dir=wd,
+                    api_key=inst.api_key, model=inst.model,
+                    claude_path=self._claude_path,
+                )
+            # 재시작 시 RUNNING 상태는 실제로 실행 중이지 않으므로 IDLE로 정리
+            if inst.status == InstanceStatus.RUNNING:
+                inst.status = InstanceStatus.IDLE
+                inst.current_task_id = None
+                await self._db.save_instance(inst)
+        if instances:
+            logger.info("프로세스 복원: %d개 인스턴스", len(instances))
 
     async def _handle_task(self, task: Task) -> None:
         proc = self._processes.get(task.instance_id)

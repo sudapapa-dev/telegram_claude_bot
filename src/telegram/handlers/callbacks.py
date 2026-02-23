@@ -51,7 +51,11 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> in
 
     # 액션
     if data.startswith("action:"):
-        _, action, tid = data.split(":", 2)
+        parts = data.split(":", 2)
+        if len(parts) < 3:
+            await query.edit_message_text("❌ 잘못된 액션 데이터")
+            return None
+        _, action, tid = parts
 
         if action == "run":
             ctx.user_data["pending_run_instance"] = tid
@@ -90,7 +94,11 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> in
 
     # 확인 처리
     if data.startswith("confirm:"):
-        _, action, tid = data.split(":", 2)
+        parts = data.split(":", 2)
+        if len(parts) < 3:
+            await query.edit_message_text("❌ 잘못된 확인 데이터")
+            return None
+        _, action, tid = parts
         if action == "delete":
             await mgr.delete_instance(tid)
             await query.edit_message_text(f"\U0001f5d1 인스턴스 삭제됨: {tid}")
@@ -121,6 +129,9 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> in
 
 
 async def prompt_input_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+    if not _is_allowed(update, ctx):
+        await update.message.reply_text("\u26d4 접근이 거부되었습니다.")
+        return ConversationHandler.END
     iid = ctx.user_data.pop("pending_run_instance", None)
     if not iid:
         await update.message.reply_text("\u274c 세션 만료")
