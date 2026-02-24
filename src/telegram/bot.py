@@ -28,8 +28,6 @@ from src.telegram.handlers.commands import (
 
 logger = logging.getLogger(__name__)
 
-MAX_WORKERS = 1
-
 
 # ── 메시지 큐 ────────────────────────────────────────────────────────────────
 
@@ -48,36 +46,46 @@ class _QueuedMessage:
 
 
 class MessageQueue:
-    """텔레그램 메시지를 큐에 쌓고 순서대로 처리.
+    """텔레그램 메시지를 비동기 병렬 처리.
 
-    수신 → 큐 저장 → Claude 전달 → 텔레그램 전송.
-    단일 대화 세션을 유지하기 위해 workers=1 권장.
+    수신 → 큐 저장 → Claude 전달(비동기 fire-and-forget) → 텔레그램 전송.
+    서로 다른 세션의 메시지는 동시 처리되고,
+    같은 세션의 메시지는 NamedSessionManager 내부 Lock으로 순서 보장.
     """
 
-    def __init__(self, bot: Bot, workers: int = MAX_WORKERS) -> None:
+    def __init__(self, bot: Bot) -> None:
         self._bot = bot
-        self._workers_count = workers
         self._queue: asyncio.Queue[_QueuedMessage] = asyncio.Queue()
-        self._semaphore = asyncio.Semaphore(workers)
-        self._workers: list[asyncio.Task[None]] = []
+        self._dispatcher_task: asyncio.Task[None] | None = None
         self._running = False
         self._processing: list[_QueuedMessage] = []  # 현재 처리 중인 항목들
+        self._active_tasks: set[asyncio.Task[None]] = set()  # 비동기 처리 태스크 추적
 
     async def start(self) -> None:
         self._running = True
-        for i in range(self._workers_count):
-            t = asyncio.create_task(self._worker(i), name=f"msg-worker-{i}")
-            self._workers.append(t)
-        logger.info("MessageQueue 시작: workers=%d", self._workers_count)
+        self._dispatcher_task = asyncio.create_task(
+            self._dispatcher(), name="msg-dispatcher"
+        )
+        logger.info("MessageQueue 시작: 비동기 병렬 처리 모드")
 
     async def stop(self) -> None:
-        """큐 중지. 처리 중인 워커를 종료."""
+        """큐 중지. 처리 중인 태스크를 종료."""
         self._running = False
 
-        for t in self._workers:
-            t.cancel()
-        await asyncio.gather(*self._workers, return_exceptions=True)
-        self._workers.clear()
+        if self._dispatcher_task:
+            self._dispatcher_task.cancel()
+            try:
+                await self._dispatcher_task
+            except asyncio.CancelledError:
+                pass
+
+        # 진행 중인 모든 처리 태스크 취소
+        for task in list(self._active_tasks):
+            task.cancel()
+        if self._active_tasks:
+            await asyncio.gather(*self._active_tasks, return_exceptions=True)
+        self._active_tasks.clear()
+        self._processing.clear()
         logger.info("MessageQueue 중지")
 
     async def enqueue(
@@ -102,8 +110,8 @@ class MessageQueue:
         )
         await self._queue.put(item)
         logger.info(
-            "메시지 큐 추가: chat_id=%s, qsize=%d",
-            chat_id, self._queue.qsize(),
+            "메시지 큐 추가: chat_id=%s, session=%s, qsize=%d",
+            chat_id, target_session or "(기본)", self._queue.qsize(),
         )
 
     @property
@@ -153,7 +161,8 @@ class MessageQueue:
 
         return jobs
 
-    async def _worker(self, worker_id: int) -> None:
+    async def _dispatcher(self) -> None:
+        """큐에서 메시지를 꺼내 즉시 비동기 태스크로 실행 (fire-and-forget)."""
         from src.telegram.handlers.commands import _process_message
 
         while self._running:
@@ -164,37 +173,47 @@ class MessageQueue:
             except asyncio.CancelledError:
                 break
 
-            async with self._semaphore:
-                import time as _time
-                item.started_at = _time.monotonic()
-                self._processing.append(item)
-                try:
-                    logger.info(
-                        "워커-%d 처리 시작: chat_id=%s",
-                        worker_id, item.chat_id,
-                    )
-                    await _process_message(
-                        bot=self._bot,
-                        update_data=item.update_data,
-                        bot_data=item.context_bot_data,
-                        chat_id=item.chat_id,
-                        message_id=item.message_id,
-                        ack_message_id=item.ack_message_id,
-                    )
-                except Exception:
-                    logger.exception("워커-%d 처리 오류: chat_id=%s", worker_id, item.chat_id)
-                    try:
-                        await self._bot.send_message(
-                            chat_id=item.chat_id,
-                            text="❌ 메시지 처리 중 오류가 발생했습니다.",
-                            reply_to_message_id=item.message_id,
-                        )
-                    except Exception:
-                        pass
-                finally:
-                    if item in self._processing:
-                        self._processing.remove(item)
-                    self._queue.task_done()
+            import time as _time
+            item.started_at = _time.monotonic()
+            self._processing.append(item)
+
+            task = asyncio.create_task(
+                self._handle_item(item, _process_message),
+                name=f"msg-{item.target_session or 'default'}-{item.message_id}",
+            )
+            self._active_tasks.add(task)
+            task.add_done_callback(self._active_tasks.discard)
+
+            logger.info(
+                "메시지 디스패치: chat_id=%s, session=%s, active=%d",
+                item.chat_id, item.target_session or "(기본)", len(self._active_tasks),
+            )
+            self._queue.task_done()
+
+    async def _handle_item(self, item: _QueuedMessage, process_fn) -> None:  # type: ignore[type-arg]
+        """개별 메시지 처리 (비동기 태스크로 실행됨)."""
+        try:
+            await process_fn(
+                bot=self._bot,
+                update_data=item.update_data,
+                bot_data=item.context_bot_data,
+                chat_id=item.chat_id,
+                message_id=item.message_id,
+                ack_message_id=item.ack_message_id,
+            )
+        except Exception:
+            logger.exception("메시지 처리 오류: chat_id=%s, session=%s", item.chat_id, item.target_session)
+            try:
+                await self._bot.send_message(
+                    chat_id=item.chat_id,
+                    text="❌ 메시지 처리 중 오류가 발생했습니다.",
+                    reply_to_message_id=item.message_id,
+                )
+            except Exception:
+                pass
+        finally:
+            if item in self._processing:
+                self._processing.remove(item)
 
 
 # ── 봇 ──────────────────────────────────────────────────────────────────────
@@ -250,12 +269,6 @@ class TelegramClaudeBot:
 
         chat_id = update.effective_chat.id
         message_id = update.message.message_id
-        qsize = self._msg_queue.pending_count if self._msg_queue else 0
-
-        if qsize > 0:
-            ack = await update.message.reply_text(f"⏳ 대기 중... (앞에 {qsize}개)")
-        else:
-            ack = await update.message.reply_text("⏳ 처리 중...")
 
         if self._msg_queue:
             raw_text = (update.message.text or update.message.caption or "") if update.message else ""
@@ -268,6 +281,11 @@ class TelegramClaudeBot:
                     target_session = parsed[0]
                 elif named_mgr.default_session:
                     target_session = named_mgr.default_session.display_name
+
+            # ACK 메시지 전송 (세션 이름 포함)
+            session_label = f"[{target_session}] " if target_session else ""
+            ack = await update.message.reply_text(f"⏳ {session_label}처리 중...")
+
             await self._msg_queue.enqueue(
                 update_data=update.to_dict(),
                 bot_data=dict(ctx.bot_data),
@@ -366,7 +384,7 @@ class TelegramClaudeBot:
     async def run(self) -> None:
         await self.initialize()
         await self.app.initialize()
-        self._msg_queue = MessageQueue(self.app.bot)
+        self._msg_queue = MessageQueue(bot=self.app.bot)
         await self._msg_queue.start()
         # 이름 세션 모니터 시작 + 프로세스 즉시 기동
         named_mgr: NamedSessionManager = self.app.bot_data["named_session_manager"]

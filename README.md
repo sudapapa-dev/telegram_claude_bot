@@ -26,7 +26,6 @@
 - [텔레그램 명령어](#텔레그램-명령어)
 - [이름 세션 시스템](#이름-세션-시스템)
 - [아키텍처](#아키텍처)
-- [문제 해결](#문제-해결)
 
 ---
 
@@ -433,25 +432,3 @@ telegram_claude_bot/
 - **Claude Code CLI** (stream-json 프로토콜)
 - **PyInstaller** (Windows EXE 빌드)
 - **Docker** (Linux/NAS 배포)
-
----
-
-## 문제 해결
-
-### Windows
-
-| 증상 | 해결 방법 |
-|------|----------|
-| "python을 찾을 수 없습니다" | Python 설치 후 터미널 재시작. "Add Python to PATH" 체크 확인 |
-| "claude를 찾을 수 없습니다" | Node.js 설치 후 터미널 재시작. PATH 갱신 필요 |
-| `[WinError 2]` (서비스 환경) | `.env`에 절대 경로 설정: `CLAUDE_CODE_PATH=C:\Users\사용자명\.local\bin\claude.exe` |
-| 봇이 응답하지 않음 | `.env`의 `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` 값 확인. `claude login` 인증 확인 |
-
-### Linux / Docker
-
-| 증상 | 해결 방법 |
-|------|----------|
-| `401 authentication_error` | OAuth 토큰 만료. `claude login` 재인증 후 `.credentials.json` 재복사, 컨테이너 재시작 |
-| 컨테이너 즉시 종료 | `docker logs telegram_claude_bot`으로 오류 확인. `.env` 설정 누락 여부 확인 |
-| 인증 URL 접근 불가 | OAuth 콜백은 localhost로 돌아옴. 같은 머신의 브라우저에서 열거나, 방법 A(파일 복사) 사용 |
-| 권한 오류 | `claude_auth/`, `data/`, `workspace/` 디렉토리 권한 확인 (`chmod 755`) |
