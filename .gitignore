@@ -14,3 +14,5 @@ release/
 chat_history.json
 claude_auth/
 .password
+.serena/
+.vscode/

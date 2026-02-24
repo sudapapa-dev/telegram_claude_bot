@@ -11,38 +11,17 @@ services:
     container_name: telegram_claude_bot
     restart: unless-stopped
 
-    # .env 파일이 있으면 환경변수로 로드 (없어도 오류 없음)
-    env_file:
-      - path: .env
-        required: false
-
+    # Docker 전용 고정 환경변수만 설정
+    # 나머지 설정(TELEGRAM_BOT_TOKEN, NOTION_TOKEN 등)은
+    # 볼륨 마운트된 .env 파일에서 앱(Pydantic Settings)이 직접 읽음
+    # → .env 수정 후 docker restart 만으로 반영됨
     environment:
-      # 필수 환경변수 (.env 파일 또는 호스트 환경변수에서 주입)
-      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
-      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
-
-      # Claude 설정
-      - CLAUDE_CODE_PATH=claude
-      - DEFAULT_MODEL=${DEFAULT_MODEL:-claude-sonnet-4-6}
-      - DEFAULT_SESSION_NAME=${DEFAULT_SESSION_NAME:-suho}
-      - CLAUDE_WORKSPACE=/app/workspace
-
-      # 시스템 프롬프트 (단일 또는 다중 설정 가능)
-      - SYSTEM_PROMPT=${SYSTEM_PROMPT:-}
-      - SYSTEM_PROMPT_1=${SYSTEM_PROMPT_1:-}
-      - SYSTEM_PROMPT_2=${SYSTEM_PROMPT_2:-}
-      - SYSTEM_PROMPT_3=${SYSTEM_PROMPT_3:-}
-
-      # 동시 처리 설정
-      - MAX_CONCURRENT=${MAX_CONCURRENT:-3}
-
-      # Notion MCP 토큰 (선택적)
-      - NOTION_TOKEN=${NOTION_TOKEN:-}
-
-      # 데이터 경로 (컨테이너 내부 고정 경로)
       - DATABASE_PATH=/app/data/.db/telegram_claude_bot.db
+      - CLAUDE_CODE_PATH=claude
 
     volumes:
+      # .env 파일 → 앱이 직접 읽음 (restart 시 새 값 반영)
+      - ./.env:/app/.env:ro
       # DB 및 대화 이력 영속화
       - ./data:/app/data
       # Claude Code 작업 디렉토리
@@ -50,9 +29,7 @@ services:
       # 세션별 작업 디렉토리
       - ./sessions:/app/sessions
       # Claude CLI 인증 정보 영속화
-      # 로컬 ~/.claude 내용을 ./claude_auth/ 에 복사한 후 사용
-      # Linux/Mac: cp -r ~/.claude/* ./claude_auth/
-      # Windows:   xcopy %USERPROFILE%\.claude claude_auth\ /E /I
+      # .credentials.json 만 복사하면 인증 완료 (docker restart 로 반영)
       - ./claude_auth:/home/appuser/.claude
 
     logging:

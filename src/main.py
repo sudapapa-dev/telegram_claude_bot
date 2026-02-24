@@ -10,12 +10,10 @@ from pathlib import Path
 
 import structlog
 
-from src.orchestrator.manager import InstanceManager
 from src.shared import ai_session
 from src.shared.chat_history import ChatHistoryStore
 from src.shared.config import Settings
 from src.shared.database import Database
-from src.shared.events import EventBus
 from src.telegram.bot import TelegramClaudeBot
 
 
@@ -83,7 +81,6 @@ async def _async_main(stop_event: asyncio.Event) -> None:
     # MCP 서버 자동 설정 (NOTION_TOKEN이 있으면 ~/.claude.json에 주입)
     _inject_mcp_servers(notion_token=settings.notion_token)
 
-    event_bus = EventBus()
     db = Database(settings.database_path)
     await db.initialize()
 
@@ -105,22 +102,13 @@ async def _async_main(stop_event: asyncio.Event) -> None:
 
     settings.warn_if_open_access()
 
-    orchestrator = InstanceManager(
-        db=db, event_bus=event_bus,
-        claude_path=settings.claude_code_path,
-    )
-    await orchestrator.start()
-
     bot = TelegramClaudeBot(
         token=settings.telegram_bot_token.get_secret_value(),
-        orchestrator=orchestrator,
         allowed_users=settings.telegram_chat_id,
         history_store=history_store,
         default_session_name=settings.default_session_name or None,
         db=db,
     )
-    bot.setup_notifications(event_bus)
-
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
@@ -138,7 +126,6 @@ async def _async_main(stop_event: asyncio.Event) -> None:
     finally:
         log.info("종료 중...")
         await bot.stop()
-        await orchestrator.stop()
         await ai_session.stop()
         await db.close()
         log.info("종료 완료")

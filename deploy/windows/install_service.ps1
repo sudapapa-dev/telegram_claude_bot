@@ -138,6 +138,26 @@ if ($LASTEXITCODE -ne 0) {
 & $NssmPath set $ServiceName AppDirectory "$ScriptDir" 2>&1 | Out-Null
 & $NssmPath set $ServiceName Start SERVICE_AUTO_START 2>&1 | Out-Null
 
+# 서비스 로그온 계정: 현재 사용자 (SYSTEM 대신)
+# SYSTEM 계정은 Claude CLI 인증 정보와 PATH가 없어 실행 불가
+Write-Host ""
+Write-Host "서비스 로그온 계정을 설정합니다." -ForegroundColor Cyan
+Write-Host "SYSTEM 계정은 Claude CLI 인증/PATH가 없어 현재 사용자 계정이 필요합니다."
+Write-Host ""
+$currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+Write-Host "  현재 사용자: $currentUser"
+$password = Read-Host "  Windows 로그인 비밀번호를 입력하세요" -AsSecureString
+$plainPassword = [Runtime.InteropServices.Marshal]::PtrToStringAuto(
+    [Runtime.InteropServices.Marshal]::SecureStringToBSTR($password))
+& $NssmPath set $ServiceName ObjectName "$currentUser" "$plainPassword" 2>&1 | Out-Null
+$plainPassword = $null
+Write-Host "[OK] 서비스 로그온 계정: $currentUser" -ForegroundColor Green
+
+# 사용자 환경변수 설정 (NSSM 서비스는 USERPROFILE/HOME을 자동 설정하지 않음)
+$userProfile = [System.Environment]::GetFolderPath("UserProfile")
+& $NssmPath set $ServiceName AppEnvironmentExtra "USERPROFILE=$userProfile" "HOME=$userProfile" "HOMEPATH=$userProfile" 2>&1 | Out-Null
+Write-Host "[OK] 환경변수: USERPROFILE=$userProfile" -ForegroundColor Green
+
 # 실패 시 자동 재시작 (60초 후, 최대 3회)
 & $NssmPath set $ServiceName AppRestartDelay 60000 2>&1 | Out-Null
 & $NssmPath set $ServiceName AppExit Default Restart 2>&1 | Out-Null

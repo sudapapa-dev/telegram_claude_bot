@@ -12,9 +12,6 @@ RUN apt-get update && apt-get install -y \
 # Claude Code CLI 설치 (필수)
 RUN npm install -g @anthropic-ai/claude-code
 
-# Gemini CLI 설치 (선택적 - 실패해도 빌드 계속)
-RUN npm install -g @google/gemini-cli 2>/dev/null || echo "[INFO] Gemini CLI 설치 건너뜀"
-
 # Notion MCP 설치
 RUN npm install -g @notionhq/notion-mcp-server
 
@@ -36,7 +33,7 @@ RUN find /app/src -type d -exec chmod 755 {} \; && \
     chown -R appuser:appuser /app/src
 
 # 필요 디렉토리 생성 및 권한 설정
-RUN mkdir -p /app/src/assets /app/scripts /app/data/.db /app/workspace /app/sessions && \
+RUN mkdir -p /app/scripts /app/data/.db /app/workspace /app/sessions && \
     mkdir -p /home/appuser/.claude && \
     chown -R appuser:appuser /app /home/appuser/.claude
 
@@ -48,7 +45,6 @@ USER appuser
 
 # 환경변수 기본값
 ENV DATABASE_PATH=/app/data/.db/telegram_claude_bot.db
-ENV CLAUDE_WORKSPACE=/app/workspace
 ENV CLAUDE_CODE_PATH=claude
 ENV HOME=/home/appuser
 

@@ -3,13 +3,65 @@
 Claude Code CLI는 OAuth 브라우저 인증을 사용합니다.
 GUI 브라우저가 없는 Linux/Docker/NAS 환경에서는 아래 방법으로 인증합니다.
 
+> **인증에 필요한 파일은 `~/.claude/.credentials.json` 하나뿐입니다.**
+> `~/.claude.json`은 UI 설정/캐시 파일이며 인증과 무관합니다.
+
 ---
 
-## 방법 1: 헤드리스 인증 (터미널에서 직접)
+## 방법 1: 로컬 PC에서 인증 후 파일 복사 (권장)
 
-브라우저 없이 터미널에서 URL을 복사하여 인증하는 방식입니다.
+GUI 브라우저가 있는 PC에서 인증하고, 인증 파일을 서버로 복사하는 방식입니다.
 
-### 1-1. 컨테이너 내부에서 실행
+```
+로컬 PC (브라우저 인증)  →  .credentials.json 복사  →  서버/NAS
+```
+
+### 1-1. 로컬에서 인증
+
+```bash
+# 로컬 PC에서 실행
+claude login
+# 브라우저가 자동으로 열리고 인증 진행
+```
+
+### 1-2. 인증 파일 확인
+
+인증 완료 후 아래 파일이 생성됩니다:
+
+| 파일 | 경로 | 내용 |
+|------|------|------|
+| `.credentials.json` | `~/.claude/.credentials.json` | OAuth 토큰 (필수) |
+
+### 1-3. NAS로 복사
+
+```powershell
+# Windows PowerShell (SMB 네트워크 공유)
+copy "$env:USERPROFILE\.claude\.credentials.json" "\\NAS_IP\homes\{USER}\.docker\data\telegram_claude_bot\claude_auth\"
+```
+
+```bash
+# Linux / Mac (SSH)
+scp ~/.claude/.credentials.json user@NAS_IP:/volume1/homes/{USER}/.docker/data/telegram_claude_bot/claude_auth/
+```
+
+### 1-4. 컨테이너 재시작
+
+```bash
+DOCKER=/volume1/@appstore/ContainerManager/usr/bin/docker
+
+echo 'PASSWORD' | sudo -S $DOCKER restart telegram_claude_bot
+```
+
+---
+
+## 방법 2: 컨테이너 내부에서 직접 인증
+
+컨테이너에 접속하여 `claude login`을 실행하는 방식입니다.
+
+> **주의**: OAuth 콜백이 localhost로 돌아오므로, 인증 URL을 **같은 머신의 브라우저**에서 열어야 합니다.
+> 다른 기기(스마트폰 등)에서는 인증이 완료되지 않습니다.
+
+### 2-1. 컨테이너 내부에서 실행
 
 ```bash
 # 컨테이너에 접속
@@ -19,7 +71,7 @@ sudo docker exec -it telegram_claude_bot bash
 claude login
 ```
 
-### 1-2. NAS SSH에서 직접 실행
+### 2-2. NAS SSH에서 직접 실행
 
 ```bash
 DOCKER=/volume1/@appstore/ContainerManager/usr/bin/docker
@@ -38,7 +90,7 @@ https://console.anthropic.com/oauth/authorize?client_id=...&code_challenge=...
 Waiting for authentication...
 ```
 
-2. 출력된 URL을 복사하여 **PC 또는 스마트폰 브라우저**에서 엽니다.
+2. 출력된 URL을 **같은 머신의 브라우저**에서 엽니다.
 3. Anthropic 계정으로 로그인하고 권한을 승인합니다.
 4. 승인 완료 시 터미널에 자동으로 인증 성공 메시지가 표시됩니다:
 
@@ -48,69 +100,6 @@ Successfully authenticated!
 
 5. 인증 파일이 컨테이너 내부 `/home/appuser/.claude/.credentials.json`에 저장됩니다.
 6. 볼륨 마운트(`claude_auth/`)를 통해 컨테이너 재시작 후에도 유지됩니다.
-
-### 인증 후 컨테이너 재시작
-
-```bash
-DOCKER=/volume1/@appstore/ContainerManager/usr/bin/docker
-COMPOSE_FILE=~/.docker/data/telegram_claude_bot/docker-compose.yml
-
-echo 'PASSWORD' | sudo -S $DOCKER compose -f $COMPOSE_FILE down
-echo 'PASSWORD' | sudo -S $DOCKER compose -f $COMPOSE_FILE up -d
-```
-
----
-
-## 방법 2: 로컬 PC에서 인증 후 파일 복사
-
-GUI 브라우저가 있는 PC에서 인증하고, 인증 파일을 서버로 복사하는 방식입니다.
-
-### 순서
-
-```
-로컬 PC (브라우저 인증)  →  인증 파일 복사  →  서버/NAS
-```
-
-### 2-1. 로컬에서 인증
-
-```bash
-# 로컬 PC에서 실행
-claude login
-# 브라우저가 자동으로 열리고 인증 진행
-```
-
-### 2-2. 인증 파일 확인
-
-인증 완료 후 아래 두 파일이 생성됩니다:
-
-| 파일 | 경로 | 내용 |
-|------|------|------|
-| `.credentials.json` | `~/.claude/.credentials.json` | OAuth 토큰 (핵심) |
-| `.claude.json` | `~/.claude.json` | 계정 정보, 설정 |
-
-### 2-3. NAS로 복사
-
-```powershell
-# Windows PowerShell (SMB 네트워크 공유)
-copy "$env:USERPROFILE\.claude\.credentials.json" "\\NAS_IP\homes\{USER}\.docker\data\telegram_claude_bot\claude_auth\"
-copy "$env:USERPROFILE\.claude.json" "\\NAS_IP\homes\{USER}\.docker\data\telegram_claude_bot\claude_auth\"
-```
-
-```bash
-# Linux / Mac (SSH)
-scp ~/.claude/.credentials.json user@NAS_IP:/volume1/homes/{USER}/.docker/data/telegram_claude_bot/claude_auth/
-scp ~/.claude.json user@NAS_IP:/volume1/homes/{USER}/.docker/data/telegram_claude_bot/claude_auth/.claude.json
-```
-
-### 2-4. 컨테이너 재시작
-
-```bash
-DOCKER=/volume1/@appstore/ContainerManager/usr/bin/docker
-COMPOSE_FILE=~/.docker/data/telegram_claude_bot/docker-compose.yml
-
-echo 'PASSWORD' | sudo -S $DOCKER compose -f $COMPOSE_FILE down
-echo 'PASSWORD' | sudo -S $DOCKER compose -f $COMPOSE_FILE up -d
-```
 
 ---
 
@@ -128,13 +117,11 @@ Failed to authenticate. API Error: 401
 
 ### 빠른 재인증 (방법 1 - 권장)
 
+로컬 PC에서 `claude login` 후 `.credentials.json`을 다시 복사하고 컨테이너를 재시작합니다.
+
 ```bash
 DOCKER=/volume1/@appstore/ContainerManager/usr/bin/docker
 
-# 컨테이너 내부에서 재인증
-echo 'PASSWORD' | sudo -S $DOCKER exec -it telegram_claude_bot claude login
-
-# 재인증 후 컨테이너 재시작
 echo 'PASSWORD' | sudo -S $DOCKER restart telegram_claude_bot
 ```
 
@@ -144,9 +131,8 @@ echo 'PASSWORD' | sudo -S $DOCKER restart telegram_claude_bot
 
 ```
 claude_auth/                          ← docker-compose 볼륨 마운트
-├── .credentials.json                 ← OAuth 토큰 (accessToken, refreshToken)
-├── .claude.json                      ← 계정 정보, MCP 설정 등
-├── settings.json                     ← CLI 설정
+├── .credentials.json                 ← OAuth 토큰 (accessToken, refreshToken) ★ 필수
+├── settings.json                     ← CLI 설정 (선택)
 └── ...                               ← 기타 캐시/이력 파일
 ```
 
@@ -155,10 +141,4 @@ claude_auth/                          ← docker-compose 볼륨 마운트
 ```yaml
 volumes:
   - ./claude_auth:/home/appuser/.claude
-```
-
-`entrypoint.sh`가 컨테이너 시작 시 `.claude.json`을 홈 디렉토리로 복사합니다:
-
-```
-claude_auth/.claude.json  →  /home/appuser/.claude.json
 ```

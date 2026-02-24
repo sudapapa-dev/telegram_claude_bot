@@ -1,8 +1,9 @@
 # telegram_claude_bot
 
 ## Project Overview
-Claude Code Orchestration System - 텔레그램을 통해 다수의 Claude Code 인스턴스를 원격 제어하고 모니터링하는 시스템.
-사용자별 Anthropic API 키를 관리하여 각자의 모델/요금제로 Claude Code를 사용할 수 있다.
+텔레그램을 통해 Claude Code를 원격 제어하는 시스템.
+OAuth 인증 기반으로 Claude Max/Pro 플랜을 그대로 활용할 수 있다.
+이름 세션으로 여러 Claude Code 프로세스를 동시에 관리한다.
 
 ## Architecture
 
@@ -10,32 +11,32 @@ Claude Code Orchestration System - 텔레그램을 통해 다수의 Claude Code 
 [Telegram Users]
       │
 [Telegram Bot (python-telegram-bot)]
+      │ MessageQueue (순서 보장)
       │
-[Orchestrator (InstanceManager + TaskQueue)]
+[Named Session Manager]  ← 이름 세션 라우팅
       │
-[Claude Code CLI Processes]  ← 인스턴스별 ANTHROPIC_API_KEY 환경변수 주입
+[Claude Code CLI Processes]  ← OAuth 인증 (~/.claude/.credentials.json)
       │
-[SQLite DB (상태 영속화)]
+[SQLite DB (세션/이력 영속화)]
 ```
 
 ### Core Components
-1. **Telegram Bot** (`src/telegram/`) - 사용자 인터페이스. 명령 수신, 결과 표시, 모니터링 UI
-2. **Orchestrator** (`src/orchestrator/`) - 핵심 엔진. Claude Code 프로세스 생명주기 관리 및 작업 실행
-3. **Shared** (`src/shared/`) - 공통 모델, 설정, DB, 이벤트 버스
+1. **Telegram Bot** (`src/telegram/`) - 사용자 인터페이스. 명령 수신, 메시지 큐, 결과 표시
+2. **Shared** (`src/shared/`) - 공통 모델, 설정, DB, AI 세션, 이름 세션, 대화 이력
 
 ### System Flow
-1. 사용자가 텔레그램으로 명령 전송 (`/run`, `/status` 등)
-2. 텔레그램 봇 핸들러가 Orchestrator를 직접 호출
-3. Orchestrator가 Claude Code CLI 프로세스를 spawn (인스턴스별 API 키/모델 적용)
-4. 결과를 Orchestrator → 텔레그램 봇 → 사용자에게 전달
-5. 비동기 작업은 EventBus를 통해 완료 알림 push
+1. 사용자가 텔레그램으로 메시지 전송 (또는 `/new`, `/status` 등 명령)
+2. MessageQueue가 순서대로 메시지 처리
+3. NamedSessionManager가 이름 세션으로 라우팅 (또는 기본 세션 사용)
+4. Claude Code CLI 프로세스가 stream-json 프로토콜로 응답 생성
+5. 결과를 텔레그램으로 전달 (3000자 초과 시 파일 전송)
 
 ## Tech Stack
 - **Language**: Python 3.11+
 - **Telegram**: python-telegram-bot v21+
 - **Database**: SQLite (aiosqlite)
 - **Process Management**: asyncio.subprocess for Claude Code CLI
-- **Config**: Pydantic Settings (.env)
+- **Config**: Pydantic Settings (.env) + claude CLI 경로 자동 탐지
 - **Logging**: structlog
 - **EXE Build**: PyInstaller (단일 파일)
 
@@ -46,39 +47,44 @@ telegram_claude_bot/
 ├── .claude/agents/              # 에이전트 팀 정의
 ├── src/                         # 모든 소스 코드는 src/ 안에만
 │   ├── __init__.py
-│   ├── main.py                  # 진입점 (봇 + 오케스트레이터 부트스트랩 + exe entry)
+│   ├── main.py                  # 진입점 (봇 부트스트랩 + exe entry)
 │   ├── telegram/
-│   │   ├── bot.py               # Bot 초기화 및 실행
-│   │   ├── handlers/
-│   │   │   ├── commands.py      # /start, /status, /run, /setkey, /settoken 등
-│   │   │   └── callbacks.py     # Inline keyboard + ConversationHandler
-│   │   └── keyboards.py         # Inline keyboard 빌더
-│   ├── orchestrator/
-│   │   ├── manager.py           # 인스턴스 매니저
-│   │   ├── process.py           # Claude Code CLI 프로세스 래퍼
-│   │   └── queue.py             # 우선순위 작업 큐
+│   │   ├── bot.py               # Bot + MessageQueue 초기화 및 실행
+│   │   └── handlers/
+│   │       └── commands.py      # /start, /new, /open, /close, /status 등
 │   └── shared/
-│       ├── config.py            # Pydantic Settings
-│       ├── models.py            # 데이터 모델
-│       ├── database.py          # SQLite
-│       └── events.py            # 이벤트 버스
+│       ├── config.py            # Pydantic Settings + claude 경로 자동 탐지
+│       ├── models.py            # 데이터 모델 (ChatMessage, NamedSession)
+│       ├── database.py          # SQLite (chat_history, named_sessions)
+│       ├── ai_session.py        # Claude CLI 세션 관리 (stream-json)
+│       ├── named_sessions.py    # 이름 세션 관리자
+│       └── chat_history.py      # 대화 이력 저장소
 ├── tests/
 ├── .env.example
 ├── pyproject.toml
-└── deploy/windows/telegram_claude_bot.spec  # PyInstaller exe 빌드
+└── deploy/
+    ├── docker/                  # Docker/NAS 배포
+    └── windows/                 # Windows 배포 (install.bat, NSSM 서비스, PyInstaller)
 ```
 
 ## Telegram Commands
 - `/start` - 봇 시작 및 도움말
-- `/status` - 전체 시스템 상태 요약
-- `/instances` - 인스턴스 목록 (인라인 키보드)
-- `/create <name> <dir> <api_key> [model]` - 인스턴스 생성
-- `/run <id> <prompt>` - 작업 실행
-- `/logs <id>` - 로그 조회
-- `/stop <id>` / `/stopall` - 중지
-- `/setkey <id> <key>` - API 키 변경
-- `/setmodel <id> <model>` - 모델 변경
-- `/settoken <token>` - 봇 토큰 변경 (.env 업데이트, 재시작 필요)
+- `/new [이름]` - 새 대화 시작 또는 이름 세션 생성
+- `/open <이름> [디렉토리]` - 이름 세션 생성 (디렉토리 선택적)
+- `/close [이름]` - 세션 종료 (이름 생략 시 기본 세션 초기화)
+- `/default [이름]` - 기본 라우팅 세션 설정/해제
+- `/job` - 처리 중/대기 중 작업 목록
+- `/clean` - 대화 이력 및 캐시 초기화
+- `/status` - 시스템 상태
+- `/history` - 대화 이력
+- `@` - 세션 목록 조회
+- `@세션이름 메시지` - 특정 세션에 메시지 전달
+
+## Authentication
+- Claude Code는 OAuth 브라우저 인증 사용 (`claude login`)
+- 인증 파일: `~/.claude/.credentials.json` (이것 하나만 필요)
+- Docker 환경: `claude_auth/` 볼륨 마운트 → `docker restart`로 반영
+- Windows 서비스: `config.py`가 claude CLI 절대 경로를 자동 탐지
 
 ## Build & Run
 
@@ -91,8 +97,9 @@ python -m src.main
 ### EXE 빌드
 ```bash
 pip install pyinstaller
-pyinstaller deploy/windows/telegram_claude_bot.spec --clean --noconfirm --workpath build/.tmp --distpath build
-# build/telegram_claude_bot/ 폴더 생성됨 → 같은 폴더에 .env 파일 필요
+pyinstaller deploy/windows/telegram_claude_bot.spec --clean --noconfirm --workpath build/.tmp --distpath dist
+# dist/telegram_claude_bot/ 폴더 생성됨
+# install.bat 실행 → 환경 설치 → telegram_claude_bot.exe 실행
 ```
 
 ## Coding Conventions
@@ -114,5 +121,4 @@ pyinstaller deploy/windows/telegram_claude_bot.spec --clean --noconfirm --workpa
 
 ### Inter-agent Communication
 - 공유 인터페이스: `src/shared/models.py`
-- 이벤트 기반: `src/shared/events.py` EventBus
-- 텔레그램 봇은 Orchestrator InstanceManager를 직접 의존성 주입
+- 이름 세션 관리: `src/shared/named_sessions.py` NamedSessionManager

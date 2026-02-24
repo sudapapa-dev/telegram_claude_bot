@@ -9,7 +9,6 @@ from typing import TYPE_CHECKING
 from telegram import Update
 from telegram.ext import ContextTypes
 
-from src.orchestrator.manager import InstanceManager
 from src.shared import ai_session as session_mod
 
 if TYPE_CHECKING:
@@ -17,10 +16,6 @@ if TYPE_CHECKING:
     from src.shared.named_sessions import NamedSessionManager
 
 logger = logging.getLogger(__name__)
-
-
-def _mgr(ctx: ContextTypes.DEFAULT_TYPE) -> InstanceManager:
-    return ctx.bot_data["orchestrator"]
 
 
 def _user_id(update: Update) -> int:
@@ -70,59 +65,26 @@ async def start_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 async def status_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not await _check_allowed(update, ctx):
         return
-    from src.shared import ai_session as session_mod
-    s = await _mgr(ctx).get_status()
-    sess = session_mod.get_session_status()
-    session_info = f"활성 (`{sess['session_id']}`)" if sess["has_session"] else "새 세션"
+    manager: NamedSessionManager | None = ctx.bot_data.get("named_session_manager")
+    sessions = manager.list_all() if manager else []
+    idle = sum(1 for s in sessions if s.status.value == "idle")
+    busy = sum(1 for s in sessions if s.status.value == "busy")
+    dead = sum(1 for s in sessions if s.status.value == "dead")
+    default_name = (
+        manager.default_session.display_name
+        if manager and manager.default_session
+        else "\uc5c6\uc74c"
+    )
     text = (
-        f"\U0001f4ca *시스템 상태*\n\n"
-        f"인스턴스: {s.total}개\n"
-        f"  \U0001f7e2 실행중: {s.running}\n"
-        f"  \u2b55 대기: {s.idle}\n"
-        f"  \U0001f534 중지: {s.stopped}\n"
-        f"  \u26a0\ufe0f 에러: {s.error}\n\n"
-        f"대기 작업: {s.pending_tasks}개\n\n"
-        f"기본 Claude 세션: {session_info}"
+        f"\U0001f4ca *\uc2dc\uc2a4\ud15c \uc0c1\ud0dc*\n\n"
+        f"\uc138\uc158: {len(sessions)}\uac1c\n"
+        f"  \U0001f7e2 \ub300\uae30: {idle}\n"
+        f"  \U0001f7e1 \ucc98\ub9ac\uc911: {busy}\n"
+        f"  \U0001f534 \uc885\ub8cc: {dead}\n\n"
+        f"\uae30\ubcf8 \uc138\uc158: {default_name}"
     )
     await update.message.reply_text(text)
 
-
-async def logs_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await _check_allowed(update, ctx):
-        return
-    args = ctx.args or []
-    if not args:
-        await update.message.reply_text("사용법: /logs <instance_id> [lines]")
-        return
-    try:
-        limit = min(int(args[1]), 200) if len(args) > 1 else 30
-    except ValueError:
-        await update.message.reply_text("❌ lines는 숫자여야 합니다.")
-        return
-    logs = await _mgr(ctx).get_logs(args[0], limit)
-    if not logs:
-        await update.message.reply_text("\U0001f4ed 로그가 없습니다.")
-        return
-    text = "\n".join(logs[-limit:])
-    if len(text) > 4000:
-        text = "...(잘림)\n" + text[-4000:]
-    await update.message.reply_text(f"\U0001f4cb 로그:\n```\n{text}\n```", parse_mode="Markdown")
-
-
-async def setmodel_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await _check_allowed(update, ctx):
-        return
-    args = ctx.args or []
-    if len(args) < 2:
-        await update.message.reply_text("사용법: /setmodel <instance_id> <model>")
-        return
-    mgr = _mgr(ctx)
-    inst = await mgr.get_instance(args[0])
-    if not inst:
-        await update.message.reply_text(f"\u274c 인스턴스 없음: {args[0]}")
-        return
-    await mgr.update_model(args[0], args[1])
-    await update.message.reply_text(f"\U0001f504 모델 변경됨: {inst.name} \u2192 {args[1]}")
 
 
 async def new_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int | None:
@@ -598,3 +560,5 @@ async def history_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
     text = "".join(lines)
     for i in range(0, len(text), 4096):
         await update.message.reply_text(text[i:i + 4096])
+
+

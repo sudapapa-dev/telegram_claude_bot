@@ -3,31 +3,26 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from telegram import Bot
 from telegram.ext import (
-    Application, CallbackQueryHandler, CommandHandler,
-    ConversationHandler, MessageHandler, filters,
+    Application, CommandHandler,
+    MessageHandler, filters,
 )
 
-from src.orchestrator.manager import InstanceManager
 from src.shared.chat_history import ChatHistoryStore
-from src.shared.events import EventBus
-from src.shared.models import Task
-from src.telegram.handlers.callbacks import (
-    WAITING_PROMPT,
-    callback_handler,
-    cancel_conversation, prompt_input_handler,
-)
 from src.shared.named_sessions import NamedSessionManager
+
+if TYPE_CHECKING:
+    from src.shared.database import Database
+
 from src.telegram.handlers.commands import (
     clean_command,
     close_command,
     default_command,
     history_command,
-    logs_command, new_command, open_command,
-    setmodel_command,
+    new_command, open_command,
     start_command, status_command,
 )
 
@@ -210,14 +205,12 @@ class TelegramClaudeBot:
     def __init__(
         self,
         token: str,
-        orchestrator: InstanceManager,
         allowed_users: list[int] | None = None,
-        history_store: "ChatHistoryStore | None" = None,
+        history_store: ChatHistoryStore | None = None,
         default_session_name: str | None = None,
-        db: "Database | None" = None,
+        db: Database | None = None,
     ) -> None:
         self.token = token
-        self.orchestrator = orchestrator
         self.allowed_users = allowed_users or []
         self.history_store = history_store
         self.default_session_name = default_session_name
@@ -227,20 +220,9 @@ class TelegramClaudeBot:
         self._register_handlers()
 
     def _register_handlers(self) -> None:
-        # 인라인 키보드 ConversationHandler
-        callback_conv = ConversationHandler(
-            entry_points=[CallbackQueryHandler(callback_handler)],
-            states={
-                WAITING_PROMPT: [MessageHandler(filters.TEXT & ~filters.COMMAND, prompt_input_handler)],
-            },
-            fallbacks=[CommandHandler("cancel", cancel_conversation)],
-            per_message=False,
-        )
         for name, handler in [
             ("start", start_command), ("help", start_command),
             ("status", status_command),
-            ("logs", logs_command),
-            ("setmodel", setmodel_command),
             ("clean", clean_command),
             ("history", history_command),
             ("new", new_command),
@@ -250,7 +232,6 @@ class TelegramClaudeBot:
         ]:
             self.app.add_handler(CommandHandler(name, handler))
         self.app.add_handler(CommandHandler("job", self._job_command))
-        self.app.add_handler(callback_conv)
         self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._enqueue_handler))
         self.app.add_handler(MessageHandler(filters.PHOTO, self._enqueue_handler))
 
@@ -340,18 +321,6 @@ class TelegramClaudeBot:
             parse_mode="Markdown",
         )
 
-    def setup_notifications(self, event_bus: EventBus) -> None:
-        event_bus.on("task:completed", self._on_task_completed)
-        event_bus.on("task:failed", self._on_task_failed)
-
-    async def _on_task_completed(self, task: Task) -> None:
-        preview = (task.result or "")[:200]
-        await self._notify_all(f"\u2705 작업 완료\nTask: `{task.id}`\nInstance: {task.instance_id}\n\n{preview}")
-
-    async def _on_task_failed(self, task: Task) -> None:
-        err = (task.error or "알 수 없는 오류")[:200]
-        await self._notify_all(f"\u274c 작업 실패\nTask: `{task.id}`\nInstance: {task.instance_id}\n\n오류: {err}")
-
     async def _notify_all(self, text: str) -> None:
         for cid in self.allowed_users:
             try:
@@ -360,7 +329,6 @@ class TelegramClaudeBot:
                 logger.exception("알림 실패: chat_id=%s", cid)
 
     async def initialize(self) -> None:
-        self.app.bot_data["orchestrator"] = self.orchestrator
         self.app.bot_data["allowed_users"] = self.allowed_users
         self.app.bot_data["history_store"] = self.history_store
         self.app.bot_data["default_session_name"] = self.default_session_name

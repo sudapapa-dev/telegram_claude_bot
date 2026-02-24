@@ -228,18 +228,40 @@ class ClaudeSession:
         ]
 
         logger.info(
-            "ClaudeSession 프로세스 시작: model=%s, cwd=%s, resume=%s",
-            self._model, cwd, bool(resume_session_id),
+            "ClaudeSession 프로세스 시작: cmd[0]=%s, model=%s, cwd=%s, resume=%s",
+            self._claude_path, self._model, cwd, bool(resume_session_id),
         )
 
-        self._proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            cwd=cwd,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=env,
-        )
+        # 사전 검증: 실행 파일과 작업 디렉토리 존재 확인
+        claude_exe = Path(self._claude_path)
+        if claude_exe.is_absolute() and not claude_exe.exists():
+            raise FileNotFoundError(
+                f"[WinError 2] Claude CLI 실행 파일을 찾을 수 없습니다: {self._claude_path}\n"
+                f".env의 CLAUDE_CODE_PATH 설정을 확인하세요."
+            )
+        cwd_path = Path(cwd)
+        if not cwd_path.is_dir():
+            logger.warning("작업 디렉토리가 없어 생성합니다: %s", cwd)
+            cwd_path.mkdir(parents=True, exist_ok=True)
+
+        try:
+            self._proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                cwd=cwd,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=env,
+            )
+        except FileNotFoundError as e:
+            raise FileNotFoundError(
+                f"[WinError 2] 지정된 파일을 찾을 수 없습니다\n"
+                f"  실행 경로: {self._claude_path}\n"
+                f"  작업 디렉토리: {cwd}\n"
+                f"  원본 오류: {e}\n"
+                f"해결: .env에서 CLAUDE_CODE_PATH를 절대 경로로 설정하세요.\n"
+                f"  예: CLAUDE_CODE_PATH=C:\\Users\\user\\.local\\bin\\claude.exe"
+            ) from e
         logger.info("프로세스 기동: pid=%d, cmd=%s", self._proc.pid, " ".join(cmd))
 
         # session_id는 첫 ask() 응답의 stdout에서 init 이벤트로 수신됨

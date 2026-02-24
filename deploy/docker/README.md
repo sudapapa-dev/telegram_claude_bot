@@ -23,7 +23,7 @@ deploy/docker/
 ├── data/         ← 자동 생성됨
 ├── workspace/    ← 자동 생성됨
 ├── sessions/     ← 세션별 작업 디렉토리 (자동 생성됨)
-└── claude_auth/  ← Claude 인증 파일 복사 필요
+└── claude_auth/  ← .credentials.json 복사 필요
 ```
 
 프로젝트 루트의 `.env.example`을 `deploy/docker/.env`로 복사하여 수정합니다.
@@ -40,20 +40,21 @@ cp .env.example deploy/docker/.env
 | `TELEGRAM_CHAT_ID` | 허용할 텔레그램 사용자 ID 목록 | `[123456789]` |
 | `DEFAULT_MODEL` | 사용할 Claude 모델 | `claude-sonnet-4-6` |
 | `DEFAULT_SESSION_NAME` | 기본 세션 표시 이름 | `suho` |
-| `MAX_CONCURRENT` | 동시 처리 수 | `3` |
 | `SYSTEM_PROMPT_1` | 사전 프롬프트 (여러 개 설정 가능) | 비워두면 미사용 |
 | `NOTION_TOKEN` | Notion MCP 연동 토큰 (선택) | 비워두면 미사용 |
 
 ### 2. Claude 인증 파일 복사
 
+인증에 필요한 파일은 `.credentials.json` 하나뿐입니다.
+
 ```bash
 mkdir -p deploy/docker/claude_auth
 
 # Linux / Mac
-cp -r ~/.claude/* deploy/docker/claude_auth/
+cp ~/.claude/.credentials.json deploy/docker/claude_auth/
 
 # Windows (PowerShell)
-xcopy "$env:USERPROFILE\.claude" "deploy\docker\claude_auth\" /E /I
+copy "$env:USERPROFILE\.claude\.credentials.json" "deploy\docker\claude_auth\"
 ```
 
 ### 3. 빌드 및 실행
@@ -99,7 +100,7 @@ Synology NAS의 **Container Manager** (= Docker)를 사용한 배포 방식입�
             │   └── .db/
             │       └── telegram_claude_bot.db
             ├── workspace/              ← Claude 작업 디렉토리
-            └── claude_auth/            ← Claude 인증 정보
+            └── claude_auth/            ← .credentials.json
 ```
 
 ### 사전 요구사항
@@ -140,13 +141,9 @@ mkdir -p ~/.docker/data/telegram_claude_bot
 cat > ~/.docker/data/telegram_claude_bot/.env << 'EOF'
 TELEGRAM_BOT_TOKEN=your-token
 TELEGRAM_CHAT_ID=[123456789]
-CLAUDE_CODE_PATH=claude
 DEFAULT_MODEL=claude-sonnet-4-6
 DEFAULT_SESSION_NAME=suho
-CLAUDE_WORKSPACE=/app/workspace
-MAX_CONCURRENT=3
 SYSTEM_PROMPT_1=You are a helpful assistant.
-SYSTEM_PROMPT_2=Always respond in the same language as the user.
 NOTION_TOKEN=
 EOF
 ```
@@ -168,7 +165,6 @@ services:
 
     environment:
       - CLAUDE_CODE_PATH=claude
-      - CLAUDE_WORKSPACE=/app/workspace
       - DATABASE_PATH=/app/data/.db/telegram_claude_bot.db
 
     volumes:
@@ -187,44 +183,28 @@ services:
 
 ### 5. Claude 인증 파일 복사
 
-컨테이너 내 Claude CLI가 인증을 사용하려면 로컬의 `~/.claude/` 내용을 복사해야 합니다.
+인증에 필요한 파일은 `.credentials.json` 하나뿐입니다.
 
 ```powershell
 # Windows PowerShell에서 실행 (NAS 파일 공유 경로 사용)
-xcopy "$env:USERPROFILE\.claude" "\\NAS_IP\homes\{USER}\.docker\data\telegram_claude_bot\claude_auth\" /E /I
+copy "$env:USERPROFILE\.claude\.credentials.json" "\\NAS_IP\homes\{USER}\.docker\data\telegram_claude_bot\claude_auth\"
 ```
 
 ```bash
 # Linux / Mac
-scp -r ~/.claude/* user@NAS_IP:/volume1/homes/{USER}/.docker/data/telegram_claude_bot/claude_auth/
+scp ~/.claude/.credentials.json user@NAS_IP:/volume1/homes/{USER}/.docker/data/telegram_claude_bot/claude_auth/
 ```
-
-#### entrypoint 동작 방식
-
-컨테이너는 시작 시 `entrypoint.sh`를 실행하여 볼륨에서 인증 파일을 홈 디렉토리로 자동 복사합니다.
-
-```
-claude_auth/.claude.json  →  (시작 시 자동 복사)  →  /home/appuser/.claude.json
-```
-
-따라서 `claude_auth/` 폴더에 `.claude.json`이 있으면 컨테이너 재시작 후에도 인증이 유지됩니다.
 
 #### 인증 계정 변경 방법
 
-Claude 인증은 브라우저 OAuth 방식으로, **텔레그램으로는 변경 불가**합니다.
+Claude 인증은 브라우저 OAuth 방식입니다.
 인증 계정을 바꾸려면:
 
-1. 로컬에서 `claude` 명령으로 새 계정으로 재인증
-2. 생성된 `~/.claude.json` 을 `claude_auth/` 폴더에 복사
-3. 컨테이너 재시작
+1. 로컬에서 `claude login` 으로 새 계정으로 재인증
+2. 생성된 `~/.claude/.credentials.json` 을 `claude_auth/` 폴더에 복사
+3. 컨테이너 재시작: `docker restart telegram_claude_bot`
 
-```bash
-# 재인증 후 복사 (Linux/Mac)
-cp ~/.claude.json /path/to/claude_auth/.claude.json
-
-# Windows
-copy %USERPROFILE%\.claude.json \\NAS_IP\homes\{USER}\.docker\data\telegram_claude_bot\claude_auth\.claude.json
-```
+자세한 내용은 [Linux_Claude_Auth.md](Linux_Claude_Auth.md)를 참조하세요.
 
 ### 6. 이미지 로드 및 컨테이너 실행
 
@@ -256,7 +236,7 @@ COMPOSE_FILE=~/.docker/data/telegram_claude_bot/docker-compose.yml
 # 로그 확인
 echo 'PASSWORD' | sudo -S $DOCKER logs telegram_claude_bot --tail 50 -f
 
-# 재시작
+# 재시작 (.env 변경, 인증 파일 교체 시)
 echo 'PASSWORD' | sudo -S $DOCKER restart telegram_claude_bot
 
 # 중지
@@ -308,28 +288,20 @@ echo 'PASSWORD' | sudo -S $DOCKER logs telegram_claude_bot --tail 20
 ### Claude 인증 오류
 
 ```
-Claude configuration file not found at: /home/appuser/.claude.json
+Failed to authenticate. API Error: 401
 ```
 
-위 오류가 발생하면 `claude_auth/` 볼륨에 `.claude.json`이 없는 것입니다.
+위 오류가 발생하면 `claude_auth/` 볼륨에 `.credentials.json`이 없거나 만료된 것입니다.
 
-1. 로컬에서 `claude` 명령 실행 후 `~/.claude.json` 생성 확인
+1. 로컬에서 `claude login` 실행
 2. `claude_auth/` 폴더에 복사:
    ```bash
-   cp ~/.claude.json claude_auth/.claude.json
+   cp ~/.claude/.credentials.json claude_auth/
    ```
 3. 컨테이너 재시작:
    ```bash
    docker restart telegram_claude_bot
    ```
-
-백업 파일로 복원하는 방법 (긴급 시):
-```bash
-# 컨테이너 내부에서 백업 복원
-docker exec telegram_claude_bot \
-  cp /home/appuser/.claude/backups/.claude.json.backup.* /home/appuser/.claude/.claude.json
-docker restart telegram_claude_bot
-```
 
 ### DB 파일 생성 오류 (unable to open database file)
 
