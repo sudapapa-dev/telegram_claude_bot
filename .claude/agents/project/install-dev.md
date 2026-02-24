@@ -1,6 +1,6 @@
 ---
 name: install-dev
-description: 설치 스크립트, 배포 자동화, Docker, PyInstaller 빌드 전담. install.ps1 작성/수정, Dockerfile 수정, deploy/windows/controltower.spec 수정, 배포 환경 설정 시 사용.
+description: 설치 스크립트, 배포 자동화, Docker, PyInstaller 빌드 전담. install.ps1 작성/수정, Dockerfile 수정, deploy/windows/telegram_claude_bot.spec 수정, 배포 환경 설정 시 사용.
 tools: Read, Write, Edit, Bash, Glob, Grep, WebSearch
 model: inherit
 ---
@@ -13,7 +13,7 @@ model: inherit
 install.ps1           # Windows 자동 설치 스크립트
 Dockerfile            # Docker 이미지 정의
 docker-compose.yml    # Docker Compose 설정
-controltower.spec     # PyInstaller EXE 빌드 스펙
+telegram_claude_bot.spec     # PyInstaller EXE 빌드 스펙
 .env.example          # 환경변수 예시
 ```
 
@@ -87,7 +87,7 @@ RUN npm install -g @anthropic-ai/claude-code
 
 ## PyInstaller 빌드
 ```bash
-pyinstaller deploy/windows/controltower.spec --clean --noconfirm
+pyinstaller deploy/windows/telegram_claude_bot.spec --clean --noconfirm
 # 결과: dist/telegram_claude_bot/ (또는 단일 exe)
 ```
 

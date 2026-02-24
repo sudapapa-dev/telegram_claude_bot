@@ -30,7 +30,7 @@
 # src/telegram/bot.py
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler
 
-class ControlTowerBot:
+class TelegramClaudeBot:
     """Claude Control Tower 텔레그램 봇"""
 
     def __init__(self, token: str, orchestrator: InstanceManager, allowed_users: list[int]):
@@ -68,7 +68,7 @@ def build_instance_keyboard(instances: list[Instance]) -> InlineKeyboardMarkup:
 ### Notification via EventBus
 ```python
 # 봇 초기화 시 이벤트 리스너 등록
-async def setup_notifications(bot: ControlTowerBot, event_bus: EventBus):
+async def setup_notifications(bot: TelegramClaudeBot, event_bus: EventBus):
     async def on_task_complete(task: TaskResult):
         text = f"✅ 작업 완료\n인스턴스: {task.instance_name}\n결과: {task.summary}"
         for chat_id in bot.allowed_users:

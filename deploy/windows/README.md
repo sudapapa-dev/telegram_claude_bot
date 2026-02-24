@@ -46,13 +46,13 @@ pip install pyinstaller
 프로젝트 루트에서 실행:
 
 ```cmd
-pyinstaller deploy/windows/controltower.spec --clean --noconfirm
+pyinstaller deploy/windows/telegram_claude_bot.spec --clean --noconfirm --workpath build/.tmp --distpath build
 ```
 
 ### 빌드 결과
 
 ```
-dist/
+build/
   telegram_claude_bot/
     telegram_claude_bot.exe   <- 실행 파일
     _internal/                <- 런타임 의존성
@@ -60,7 +60,7 @@ dist/
 
 ### 배포
 
-`dist/telegram_claude_bot/` 폴더 전체를 복사하여 배포합니다.
+`build/telegram_claude_bot/` 폴더 전체를 복사하여 배포합니다.
 
 - 실행 전 같은 폴더에 `.env` 파일을 위치시켜야 합니다.
 - `telegram_claude_bot.exe`를 실행합니다.
@@ -86,9 +86,12 @@ TELEGRAM_CHAT_ID=[123456789]
 ```
 CLAUDE_CODE_PATH=claude
 DEFAULT_MODEL=claude-sonnet-4-6
+DEFAULT_SESSION_NAME=suho
 CLAUDE_WORKSPACE=C:/Users/사용자명/projects
 MAX_CONCURRENT=3
-SESSION_POOL_SIZE=3
+SYSTEM_PROMPT_1=You are a highly capable Task Manager.
+SYSTEM_PROMPT_2=Always respond in the same language as the user.
+NOTION_TOKEN=
 ```
 
 ---

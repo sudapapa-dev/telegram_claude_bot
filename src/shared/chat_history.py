@@ -31,17 +31,29 @@ class ChatHistoryStore:
         self._memory: deque[ChatMessage] = deque(maxlen=_MAX_MEMORY)
 
     async def load(self) -> None:
-        """JSON 파일에서 이력 복원"""
-        if not self._json_path.exists():
-            logger.info("chat_history.json 없음, 빈 이력으로 시작")
-            return
+        """JSON 파일에서 이력 복원, 없거나 손상된 경우 DB에서 복원"""
+        if self._json_path.exists():
+            try:
+                data = json.loads(self._json_path.read_text(encoding="utf-8"))
+                for item in data[-_MAX_MEMORY:]:
+                    self._memory.append(ChatMessage.model_validate(item))
+                logger.info("대화 이력 복원 (JSON): %d개", len(self._memory))
+                return
+            except Exception:
+                logger.exception("chat_history.json 로드 실패, DB에서 복원 시도")
+
+        # JSON 없거나 손상된 경우 DB에서 복원
         try:
-            data = json.loads(self._json_path.read_text(encoding="utf-8"))
-            for item in data[-_MAX_MEMORY:]:
-                self._memory.append(ChatMessage.model_validate(item))
-            logger.info("대화 이력 복원: %d개", len(self._memory))
+            messages = await self._db.get_chat_history(limit=_MAX_MEMORY)
+            for m in reversed(messages):  # DB는 최신순이므로 역전하여 오래된 순으로 추가
+                self._memory.append(m)
+            if messages:
+                logger.info("대화 이력 복원 (DB): %d개", len(self._memory))
+                await self._save_json()  # DB 복원 후 JSON 동기화
+            else:
+                logger.info("이전 대화 이력 없음, 빈 이력으로 시작")
         except Exception:
-            logger.exception("chat_history.json 로드 실패, 빈 이력으로 시작")
+            logger.exception("DB 대화 이력 복원 실패, 빈 이력으로 시작")
 
     async def append(self, role: str, content: str) -> None:
         """새 메시지 추가 — 메모리·JSON·DB에 동시 저장"""

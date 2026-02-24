@@ -24,8 +24,8 @@ python -m src.main
 
 ```bash
 pip install pyinstaller
-pyinstaller deploy/windows/controltower.spec --clean --noconfirm
-# dist/telegram_claude_bot.exe 생성 → 같은 폴더에 .env 파일 필요
+pyinstaller deploy/windows/telegram_claude_bot.spec --clean --noconfirm --workpath build/.tmp --distpath build
+# build/telegram_claude_bot/ 폴더 생성됨 → 같은 폴더에 .env 파일 필요
 ```
 
 ---

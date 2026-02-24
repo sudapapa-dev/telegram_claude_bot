@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import os
 
-from pydantic import SecretStr, model_validator
+from pydantic import SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings
 
 logger = logging.getLogger(__name__)
@@ -13,16 +13,19 @@ class Settings(BaseSettings):
     """전체 시스템 설정 - .env 파일에서 로드"""
     telegram_bot_token: SecretStr          # SecretStr로 로그 노출 방지
     telegram_chat_id: list[int] = []       # 허용된 사용자 ID 목록 (텔레그램 user ID)
-    max_concurrent: int = 3                # 동시 처리 수 (인스턴스 + 세션 풀 공용)
-
-    @property
-    def session_pool_size(self) -> int:
-        return self.max_concurrent
 
     # Claude
     claude_code_path: str = "claude"
     default_model: str = "claude-sonnet-4-6"
-    claude_workspace: str = ""             # Claude Code 작업 디렉토리
+    default_session_name: str = "suho"     # 기본 세션 표시 이름 (.env에서만 변경 가능)
+
+    @field_validator("default_session_name", mode="before")
+    @classmethod
+    def _default_session_name_fallback(cls, v: str) -> str:
+        """공백만 있거나 빈 문자열이면 'suho'로 대체"""
+        if not v or not v.strip():
+            return "suho"
+        return v.strip()
 
     # 사전 프롬프트 — SYSTEM_PROMPT 단일 또는 SYSTEM_PROMPT_1~N 다중 설정 지원
     # 다중 설정 시 번호 순서대로 줄바꿈으로 합쳐서 사용
@@ -30,7 +33,9 @@ class Settings(BaseSettings):
 
     database_path: str = "./telegram_claude_bot.db"
 
-    model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
+    notion_token: str = ""                 # Notion MCP 토큰 (선택적)
+
+    model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
 
     @model_validator(mode="before")
     @classmethod

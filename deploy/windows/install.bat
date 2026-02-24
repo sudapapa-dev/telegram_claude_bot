@@ -21,7 +21,7 @@ echo.
 :: ============================================================
 :: 단계 1: Python 3.11+ 설치 확인
 :: ============================================================
-echo [1/5] Python 3.11+ 설치 확인 중...
+echo [1/6] Python 3.11+ 설치 확인 중...
 
 set "PYTHON_OK=0"
 for /f "tokens=*" %%v in ('python --version 2^>^&1') do set "PY_VER=%%v"
@@ -87,7 +87,7 @@ if !errorlevel! NEQ 0 (
 :: 단계 2: Node.js 설치 확인
 :: ============================================================
 echo.
-echo [2/5] Node.js 설치 확인 중...
+echo [2/6] Node.js 설치 확인 중...
 
 node --version >nul 2>&1
 if !errorlevel! EQU 0 (
@@ -126,7 +126,7 @@ if !errorlevel! EQU 0 (
 :: 단계 3: Claude CLI 설치 확인
 :: ============================================================
 echo.
-echo [3/5] Claude CLI 설치 확인 중...
+echo [3/6] Claude CLI 설치 확인 중...
 
 claude --version >nul 2>&1
 if !errorlevel! EQU 0 (
@@ -148,10 +148,36 @@ if !errorlevel! EQU 0 (
 )
 
 :: ============================================================
-:: 단계 4: 가상환경 생성 및 패키지 설치
+:: 단계 4: Notion MCP 모듈 설치 (선택적)
 :: ============================================================
 echo.
-echo [4/5] Python 가상환경 및 패키지 설치 중...
+echo [4/6] Notion MCP 모듈 설치 확인 중...
+
+:: npm이 있으면 Notion MCP 서버 설치 (NOTION_TOKEN 사용 시 필요)
+where npm >nul 2>&1
+if !errorlevel! EQU 0 (
+    npm list -g @notionhq/notion-mcp-server >nul 2>&1
+    if !errorlevel! EQU 0 (
+        echo     [OK] Notion MCP 모듈 이미 설치됨
+    ) else (
+        echo     [INFO] Notion MCP 모듈 설치 중...
+        npm install -g @notionhq/notion-mcp-server --quiet
+        if !errorlevel! NEQ 0 (
+            echo     [경고] Notion MCP 모듈 설치 실패. Notion 연동이 필요하면 아래 명령을 직접 실행하세요:
+            echo     npm install -g @notionhq/notion-mcp-server
+        ) else (
+            echo     [OK] Notion MCP 모듈 설치 완료
+        )
+    )
+) else (
+    echo     [SKIP] npm을 찾을 수 없어 Notion MCP 설치를 건너뜁니다.
+)
+
+:: ============================================================
+:: 단계 5: 가상환경 생성 및 패키지 설치
+:: ============================================================
+echo.
+echo [5/6] Python 가상환경 및 패키지 설치 중...
 
 if not exist "%PROJECT_ROOT%\.venv" (
     echo     [INFO] 가상환경 생성 중...
@@ -181,10 +207,10 @@ if !errorlevel! NEQ 0 (
 echo     [OK] 패키지 설치 완료
 
 :: ============================================================
-:: 단계 5: .env 파일 설정
+:: 단계 6: .env 파일 설정
 :: ============================================================
 echo.
-echo [5/5] 환경 설정 파일 확인 중...
+echo [6/6] 환경 설정 파일 확인 중...
 
 if not exist "%PROJECT_ROOT%\.env" (
     if exist "%PROJECT_ROOT%\.env.example" (

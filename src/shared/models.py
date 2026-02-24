@@ -82,3 +82,23 @@ class SystemStatus(BaseModel):
     stopped: int = 0
     error: int = 0
     pending_tasks: int = 0
+
+
+class NamedSessionStatus(str, Enum):
+    IDLE = "idle"
+    BUSY = "busy"
+    DEAD = "dead"
+
+
+class NamedSession(BaseModel):
+    """이름 기반 Claude 세션 정보"""
+    name: str                                         # 고유 식별자 (소문자, 영문/숫자/한글)
+    display_name: str                                 # 표시 이름 (원본 대소문자 유지)
+    session_uid: str = Field(default_factory=lambda: uuid4().hex[:12])  # 불변 고유 ID (폴더명 등에 사용)
+    working_dir: str                                  # 작업 디렉토리
+    status: NamedSessionStatus = NamedSessionStatus.IDLE
+    claude_session_id: str | None = None              # Claude --resume에 사용
+    created_at: datetime = Field(default_factory=_utcnow)
+    last_used_at: datetime | None = None
+    message_count: int = 0
+    last_error: str | None = None

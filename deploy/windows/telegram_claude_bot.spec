@@ -4,12 +4,16 @@ import os
 # 프로젝트 루트 (spec 파일 위치 기준 두 단계 위)
 _HERE = os.path.dirname(os.path.abspath(SPEC))
 _ROOT = os.path.abspath(os.path.join(_HERE, '..', '..'))
+_RELEASE = os.path.join(_ROOT, 'build')
+_WORKPATH = os.path.join(_ROOT, 'build', '.tmp')
 
 # src/assets 폴더가 존재할 때만 datas에 포함
 _assets_src = os.path.join(_ROOT, 'src', 'assets')
 _datas = []
 if os.path.isdir(_assets_src):
     _datas.append((_assets_src, 'assets'))
+
+# (참고) .env.example은 빌드 후 EXE 옆에 자동 복사됨 (spec 하단 참조)
 
 a = Analysis(
     [os.path.join(_ROOT, 'src', 'main.py')],
@@ -30,6 +34,8 @@ a = Analysis(
         'src.shared.models',
         'src.shared.database',
         'src.shared.events',
+        'src.shared.ai_session',
+        'src.shared.chat_history',
         'src.orchestrator.manager',
         'src.orchestrator.process',
         'src.orchestrator.queue',
@@ -75,3 +81,22 @@ coll = COLLECT(
     upx_exclude=[],
     name='telegram_claude_bot',
 )
+
+# 빌드 후: 배포 파일들을 EXE 옆에 복사
+import shutil
+_dist_dir = os.path.join(_RELEASE, 'telegram_claude_bot')
+_win_deploy = os.path.join(_ROOT, 'deploy', 'windows')
+
+_copy_files = [
+    (os.path.join(_ROOT, '.env.example'),               '.env.example'),
+    (os.path.join(_win_deploy, 'install_service.bat'),  'install_service.bat'),
+    (os.path.join(_win_deploy, 'remove_service.bat'),   'remove_service.bat'),
+    (os.path.join(_win_deploy, 'install_service.ps1'),  'install_service.ps1'),
+    (os.path.join(_win_deploy, 'remove_service.ps1'),   'remove_service.ps1'),
+]
+
+if os.path.isdir(_dist_dir):
+    for src, dst_name in _copy_files:
+        if os.path.isfile(src):
+            shutil.copy2(src, os.path.join(_dist_dir, dst_name))
+            print(f"[spec] 복사 완료: {dst_name} -> {_dist_dir}")

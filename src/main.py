@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import signal
 import sys
@@ -15,7 +16,52 @@ from src.shared.chat_history import ChatHistoryStore
 from src.shared.config import Settings
 from src.shared.database import Database
 from src.shared.events import EventBus
-from src.telegram.bot import ControlTowerBot
+from src.telegram.bot import TelegramClaudeBot
+
+
+def _inject_mcp_servers(notion_token: str) -> None:
+    """NOTION_TOKEN이 있으면 ~/.claude.json에 Notion MCP 서버 설정을 자동 주입.
+
+    기존 mcpServers의 다른 항목은 보존하고 notion 항목만 추가/갱신한다.
+    토큰이 비어있으면 아무 작업도 하지 않는다.
+    """
+    log = logging.getLogger("telegram_claude_bot")
+    if not notion_token:
+        return
+
+    claude_json_path = Path.home() / ".claude.json"
+
+    # 기존 설정 읽기
+    config: dict = {}
+    if claude_json_path.exists():
+        try:
+            config = json.loads(claude_json_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            log.warning("~/.claude.json 파싱 실패 — 새로 생성합니다")
+            config = {}
+
+    # Notion MCP 서버 설정
+    mcp_servers = config.setdefault("mcpServers", {})
+    mcp_servers["notion"] = {
+        "command": "npx",
+        "args": ["-y", "@notionhq/notion-mcp-server"],
+        "env": {
+            "OPENAPI_MCP_HEADERS": json.dumps({
+                "Authorization": f"Bearer {notion_token}",
+                "Notion-Version": "2022-06-28",
+            }),
+        },
+    }
+
+    # 저장
+    try:
+        claude_json_path.write_text(
+            json.dumps(config, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        log.info("Notion MCP 설정 주입 완료: %s", claude_json_path)
+    except OSError:
+        log.exception("~/.claude.json 쓰기 실패")
 
 
 def setup_logging() -> None:
@@ -33,26 +79,26 @@ async def _async_main(stop_event: asyncio.Event) -> None:
     log = logging.getLogger("telegram_claude_bot")
 
     settings = Settings()
+
+    # MCP 서버 자동 설정 (NOTION_TOKEN이 있으면 ~/.claude.json에 주입)
+    _inject_mcp_servers(notion_token=settings.notion_token)
+
     event_bus = EventBus()
     db = Database(settings.database_path)
     await db.initialize()
 
-    # 실행파일/스크립트 기준 경로
-    base_dir = Path(sys.executable).parent if getattr(sys, "frozen", False) else Path(__file__).parent.parent
+    # 데이터 디렉토리 (DB와 동일 위치 기준)
+    data_dir = Path(settings.database_path).parent
 
-    # AI 세션 매니저 초기화 (Claude / Gemini)
-    scripts_dir = base_dir / "scripts"
+    # AI 세션 매니저 초기화
     ai_session.init_default(
         claude_path=settings.claude_code_path,
         model=settings.default_model or None,
-        working_dir=settings.claude_workspace or None,
-        scripts_dir=str(scripts_dir) if scripts_dir.exists() else None,
-        pool_size=settings.session_pool_size,
+        data_dir=data_dir,
         system_prompt=settings.system_prompt or "",
     )
 
     # 대화 이력 스토어 초기화 (Docker: /app/data, 로컬: DB와 같은 디렉토리)
-    data_dir = Path(settings.database_path).parent
     history_store = ChatHistoryStore(json_path=data_dir / "chat_history.json", db=db)
     await history_store.load()
     ai_session.set_history_store(history_store)
@@ -62,16 +108,15 @@ async def _async_main(stop_event: asyncio.Event) -> None:
     orchestrator = InstanceManager(
         db=db, event_bus=event_bus,
         claude_path=settings.claude_code_path,
-        max_concurrent=settings.max_concurrent,
     )
     await orchestrator.start()
 
-    bot = ControlTowerBot(
+    bot = TelegramClaudeBot(
         token=settings.telegram_bot_token.get_secret_value(),
         orchestrator=orchestrator,
         allowed_users=settings.telegram_chat_id,
         history_store=history_store,
-        session_pool_size=settings.session_pool_size,
+        default_session_name=settings.default_session_name or None,
     )
     bot.setup_notifications(event_bus)
 
