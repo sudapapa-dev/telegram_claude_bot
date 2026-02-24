@@ -252,7 +252,7 @@ class NamedSessionManager:
         logger.info("named session 리셋: name=%s", name)
         return session
 
-    async def ask(self, name: str, prompt: str, timeout: int = 600) -> str:
+    async def ask(self, name: str, prompt: str, timeout: int = 1200) -> str:
         """이름 세션에 질의.
 
         동일 세션에 대한 동시 요청은 Lock으로 직렬화(순차 처리).
@@ -261,7 +261,7 @@ class NamedSessionManager:
         Args:
             name: 대상 세션 이름 (대소문자 무시).
             prompt: Claude에게 전달할 프롬프트.
-            timeout: 응답 대기 최대 시간(초). 기본값 600.
+            timeout: 응답 대기 최대 시간(초). 기본값 1200 (20분).
 
         Returns:
             Claude의 응답 텍스트.
@@ -299,10 +299,14 @@ class NamedSessionManager:
                     name,
                     session.message_count,
                 )
-                # elapsed는 ClaudeSession.ask() 내부에서 이미 로깅됨
                 return reply
             except asyncio.CancelledError:
                 session.status = NamedSessionStatus.IDLE
+                raise
+            except TimeoutError:
+                # 타임아웃: 프로세스는 살려두고 IDLE로 복원 (다음 요청에서 재사용)
+                session.status = NamedSessionStatus.IDLE
+                logger.warning("named session ask 타임아웃: name=%s, timeout=%ds", name, timeout)
                 raise
             except Exception as e:
                 session.last_error = str(e)

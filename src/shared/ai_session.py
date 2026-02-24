@@ -272,7 +272,7 @@ class ClaudeSession:
     async def ask(
         self,
         prompt: str,
-        timeout: int = 600,
+        timeout: int = 1200,
         system_prompt: str | None = None,
         resume_session_id: str | None = None,
     ) -> str:
