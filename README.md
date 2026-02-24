@@ -3,8 +3,8 @@
 텔레그램을 통해 Claude Code를 원격 제어하는 시스템.
 메시지를 보내면 Claude가 응답하며, 이름 세션으로 여러 Claude 인스턴스를 동시에 관리할 수 있습니다.
 
-![텔레그램 명령][images/shot.png]
-![실제 노션 화면][images/shot2.png]
+![텔레그램 명령](images/shot.png)
+![실제 노션 화면](images/shot2.png)
 
 ---
 
