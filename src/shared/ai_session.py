@@ -252,6 +252,7 @@ class ClaudeSession:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=env,
+                limit=16 * 1024 * 1024,  # 16MB — Claude 응답이 64KB 기본값 초과 방지
             )
         except FileNotFoundError as e:
             raise FileNotFoundError(
