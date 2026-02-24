@@ -55,9 +55,20 @@ class ChatHistoryStore:
         except Exception:
             logger.exception("DB 대화 이력 복원 실패, 빈 이력으로 시작")
 
-    async def append(self, role: str, content: str) -> None:
+    async def append(
+        self,
+        role: str,
+        content: str,
+        *,
+        session_name: str | None = None,
+        session_uid: str | None = None,
+        session_id: str | None = None,
+    ) -> None:
         """새 메시지 추가 — 메모리·JSON·DB에 동시 저장"""
-        msg = ChatMessage(role=role, content=content)
+        msg = ChatMessage(
+            role=role, content=content,
+            session_name=session_name, session_uid=session_uid, session_id=session_id,
+        )
         self._memory.append(msg)
         await self._save_json()
         try:

@@ -67,10 +67,13 @@ class InstanceConfig(BaseModel):
 
 
 class ChatMessage(BaseModel):
-    """Default Claude 대화 메시지"""
+    """Claude 대화 메시지 (세션 정보 포함)"""
     id: str = Field(default_factory=_new_id)
     role: Literal["user", "assistant"]
     content: str
+    session_name: str | None = None      # 세션 표시 이름 (예: "suho")
+    session_uid: str | None = None       # 세션 고유 ID (12자리 hex)
+    session_id: str | None = None        # Claude CLI session_id
     created_at: datetime = Field(default_factory=_utcnow)
 
 

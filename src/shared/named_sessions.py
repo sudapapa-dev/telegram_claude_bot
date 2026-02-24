@@ -21,10 +21,15 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import uuid
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
+from typing import TYPE_CHECKING
 
 from src.shared.models import NamedSession, NamedSessionStatus
+
+if TYPE_CHECKING:
+    from src.shared.database import Database
 
 logger = logging.getLogger(__name__)
 
@@ -43,14 +48,15 @@ class NamedSessionBusyError(Exception):
 class NamedSessionManager:
     """이름 기반 Claude 세션 관리자.
 
-    세션은 메모리에만 저장 (봇 재시작 시 초기화).
+    세션은 메모리 + DB에 저장하여 봇 재시작 시 복원 가능.
     이름은 대소문자 무시하여 비교.
     각 세션은 자체 영구 ClaudeSession 프로세스를 보유함.
     """
 
     _MONITOR_INTERVAL: int = 30  # 모니터링 주기 (초)
 
-    def __init__(self) -> None:
+    def __init__(self, db: Database | None = None) -> None:
+        self._db = db
         self._sessions: dict[str, NamedSession] = {}      # normalized_name → NamedSession
         self._processes: dict[str, "ClaudeSession"] = {}  # normalized_name → ClaudeSession
         self._locks: dict[str, asyncio.Lock] = {}         # normalized_name → Lock
@@ -62,6 +68,45 @@ class NamedSessionManager:
     def _normalize(name: str) -> str:
         """이름 정규화 (소문자, 앞뒤 공백 제거)"""
         return name.strip().lower()
+
+    async def _save_to_db(self, session: NamedSession, is_default: bool | None = None) -> None:
+        """세션 정보를 DB에 저장 (DB 없으면 무시)"""
+        if self._db is None:
+            return
+        try:
+            if is_default is None:
+                is_default = self._default_session == session.name
+            await self._db.save_named_session(session, is_default=is_default)
+        except Exception:
+            logger.exception("named session DB 저장 실패 (무시): name=%s", session.display_name)
+
+    async def load_from_db(self) -> int:
+        """DB에서 세션 목록을 복원. 복원된 세션 수 반환."""
+        if self._db is None:
+            return 0
+        try:
+            rows = await self._db.get_all_named_sessions()
+        except Exception:
+            logger.exception("named session DB 복원 실패")
+            return 0
+
+        count = 0
+        for session, is_default in rows:
+            key = session.name
+            if key in self._sessions:
+                continue  # 이미 존재하면 스킵 (기본 세션 등)
+            self._sessions[key] = session
+            self._locks[key] = asyncio.Lock()
+            if is_default:
+                self._default_session = key
+            count += 1
+            logger.info(
+                "named session DB 복원: name=%s, uid=%s, dir=%s, default=%s",
+                session.display_name, session.session_uid, session.working_dir, is_default,
+            )
+        if count:
+            logger.info("named session DB 복원 완료: %d개", count)
+        return count
 
     async def create(self, display_name: str, working_dir: str | None = None) -> NamedSession:
         """새 이름 세션 생성. 이미 존재하면 ValueError 발생.
@@ -79,12 +124,13 @@ class NamedSessionManager:
             ValueError: 같은 이름의 세션이 이미 존재할 때.
         """
         from src.shared.ai_session import _make_working_dir
+        if " " in display_name.strip():
+            raise ValueError("세션 이름에 공백을 포함할 수 없습니다.")
         key = self._normalize(display_name)
         if key in self._sessions:
             raise ValueError(f"이미 존재하는 세션 이름입니다: '{display_name}'")
 
         # 신규 세션: uid 먼저 생성 후 폴더 결정
-        import uuid
         session_uid = uuid.uuid4().hex[:12]
         if working_dir is None:
             working_dir = _make_working_dir(f"sessions/{session_uid}")
@@ -97,6 +143,7 @@ class NamedSessionManager:
         )
         self._sessions[key] = session
         self._locks[key] = asyncio.Lock()
+        await self._save_to_db(session)
         logger.info(
             "named session 생성: name=%s, uid=%s, dir=%s",
             display_name, session.session_uid, working_dir,
@@ -172,6 +219,12 @@ class NamedSessionManager:
         if self._default_session == key:
             self._default_session = None
             logger.info("default session 해제 (세션 삭제로 인해): name=%s", name)
+        # DB에서 삭제
+        if self._db is not None:
+            try:
+                await self._db.delete_named_session(key)
+            except Exception:
+                logger.exception("named session DB 삭제 실패 (무시): name=%s", name)
         logger.info("named session 삭제: name=%s", name)
         return True
 
@@ -240,6 +293,7 @@ class NamedSessionManager:
                 session.message_count += 1
                 session.last_error = None
                 session.status = NamedSessionStatus.IDLE
+                await self._save_to_db(session)
                 logger.info(
                     "named session ask 완료: name=%s, count=%d",
                     name,
@@ -258,7 +312,7 @@ class NamedSessionManager:
                 logger.exception("named session ask 실패 (DEAD): name=%s", name)
                 raise
 
-    def set_default(self, name: str) -> NamedSession:
+    async def set_default(self, name: str) -> NamedSession:
         """기본 라우팅 세션 설정.
 
         이후 이름 prefix 없는 메시지는 이 세션으로 전달됨.
@@ -277,12 +331,24 @@ class NamedSessionManager:
         if not session:
             raise NamedSessionNotFoundError(f"세션을 찾을 수 없습니다: '{name}'")
         self._default_session = key
+        # DB에 default 플래그 업데이트
+        if self._db is not None:
+            try:
+                await self._db.update_named_session_default(key, True)
+            except Exception:
+                logger.exception("default session DB 업데이트 실패 (무시)")
         logger.info("default session 설정: name=%s", name)
         return session
 
-    def clear_default(self) -> None:
+    async def clear_default(self) -> None:
         """기본 세션 해제. 이후 이름 없는 메시지는 글로벌 세션 풀로 전달됨."""
         self._default_session = None
+        # DB에서 default 플래그 해제
+        if self._db is not None:
+            try:
+                await self._db.clear_named_sessions_default()
+            except Exception:
+                logger.exception("default session DB 해제 실패 (무시)")
         logger.info("default session 해제")
 
     @property
@@ -397,8 +463,9 @@ class NamedSessionManager:
                     logger.exception("재시작 콜백 오류: name=%s", session.display_name)
 
     def parse_address(self, text: str) -> tuple[str, str] | None:
-        """텍스트에서 '이름, 내용' 또는 '이름: 내용' 패턴 파싱.
+        """텍스트에서 @세션이름 prefix를 파싱.
 
+        형식: "@이름 내용" 또는 "@이름\n내용"
         등록된 세션 이름과 매칭되는 경우만 반환.
         매칭 실패 시 None 반환.
 
@@ -409,23 +476,19 @@ class NamedSessionManager:
             (display_name, content) 튜플, 또는 매칭 실패 시 None.
 
         예:
-            "데이빗, 리포트 작성해줘" → ("데이빗", "리포트 작성해줘")
-            "데이빗: 안녕" → ("데이빗", "안녕")
+            "@지호 안녕" → ("지호", "안녕")
+            "@수호 리포트 작성해줘" → ("수호", "리포트 작성해줘")
             "일반 메시지" → None
         """
-        # 패턴: 맨 앞에 이름(쉼표 또는 콜론 구분자) 형태. 구분자 뒤 공백은 선택적.
-        pattern = re.compile(r'^(.+?)(?:,|:)\s*(.+)$', re.DOTALL)
-        m = pattern.match(text.strip())
+        m = re.match(r'^@(\S+)\s+(.+)$', text.strip(), re.DOTALL)
         if not m:
             return None
 
         candidate = m.group(1).strip()
         content = m.group(2).strip()
-
         if not content:
             return None
 
-        # 등록된 세션 이름과 매칭 (대소문자 무시)
         key = self._normalize(candidate)
         if key in self._sessions:
             return (self._sessions[key].display_name, content)

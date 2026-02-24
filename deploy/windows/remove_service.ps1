@@ -1,5 +1,8 @@
-# Telegram Claude Bot - NSSM 기반 서비스 제거 스크립트
+﻿# Telegram Claude Bot - NSSM 기반 서비스 제거 스크립트
 # 우클릭 -> "PowerShell로 실행" 또는 관리자 PowerShell에서 실행
+
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$OutputEncoding = [System.Text.Encoding]::UTF8
 
 $ServiceName = "TelegramClaudeBot"
 

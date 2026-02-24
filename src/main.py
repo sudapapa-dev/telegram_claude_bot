@@ -117,6 +117,7 @@ async def _async_main(stop_event: asyncio.Event) -> None:
         allowed_users=settings.telegram_chat_id,
         history_store=history_store,
         default_session_name=settings.default_session_name or None,
+        db=db,
     )
     bot.setup_notifications(event_bus)
 

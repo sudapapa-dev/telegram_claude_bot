@@ -13,3 +13,4 @@ release/
 .claude/handoffs/
 chat_history.json
 claude_auth/
+.password

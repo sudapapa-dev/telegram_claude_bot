@@ -13,6 +13,7 @@ from src.orchestrator.manager import InstanceManager
 from src.shared import ai_session as session_mod
 
 if TYPE_CHECKING:
+    from src.shared.chat_history import ChatHistoryStore
     from src.shared.named_sessions import NamedSessionManager
 
 logger = logging.getLogger(__name__)
@@ -53,10 +54,10 @@ async def start_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         "💬 *이름 세션*\n"
         "/new \\[이름\\] \\- 새 대화 시작 또는 이름 세션 생성 \\(자동 디렉토리\\)\n"
         "/open \\<이름\\> \\[디렉토리\\] \\- 이름 세션 생성 \\(디렉토리 선택적\\)\n"
-        "/session \\- 세션 목록 조회\n"
         "/close \\[이름\\] \\- 세션 종료 \\(이름 생략 시 기본 세션 초기화\\)\n"
         "/default \\[이름\\] \\- 기본 라우팅 세션 설정/해제\n\n"
-        "이름 세션 대화: `이름, 메시지` 또는 `이름: 메시지`\n\n"
+        "`@` \\- 세션 목록 조회\n"
+        "`@세션이름 메시지` \\- 세션에 메시지 전달\n\n"
         "⚙️ *시스템*\n"
         "/job \\- 처리 중/대기 중 작업 목록\n"
         "/clean \\- 대화 이력 및 캐시 초기화\n"
@@ -136,8 +137,8 @@ async def new_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int | N
         await update.message.reply_text("새 대화를 시작했습니다.")
         return None
 
-    # 이름 세션 생성 - 디렉토리 없으면 자동 생성
-    name = " ".join(args).strip()
+    # 이름 세션 생성 - 첫 인자만 이름 (공백 불가)
+    name = args[0].strip()
     if not name:
         await update.message.reply_text("❌ 세션 이름을 입력해주세요.")
         return None
@@ -155,7 +156,7 @@ async def new_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int | N
     await update.message.reply_text(
         f"✅ *'{session.display_name}'* 세션 생성 완료!\n"
         f"📁 `{session.working_dir}`\n\n"
-        f"`{session.display_name}, 메시지` 또는 `{session.display_name}: 메시지` 형식으로 대화하세요.",
+        f"`@{session.display_name} 메시지` 형식으로 대화하세요.",
         parse_mode="Markdown",
     )
     return None
@@ -200,11 +201,8 @@ async def open_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
-async def session_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """/session - 이름 세션 목록 조회"""
-    if not await _check_allowed(update, ctx):
-        return
-
+async def _show_session_list(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """세션 목록 표시 (@ 입력 또는 내부 호출용)"""
     manager: NamedSessionManager | None = ctx.bot_data.get("named_session_manager")
     if not manager:
         await update.message.reply_text("❌ 세션 관리자가 초기화되지 않았습니다.")
@@ -252,7 +250,7 @@ async def session_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
     ]
     if note:
         msg_parts.append(f"_{note}_")
-    msg_parts.append("사용법: `이름, 메시지` 또는 `이름: 메시지`")
+    msg_parts.append("사용법: `@세션이름 메시지`")
     await update.message.reply_text("\n".join(msg_parts), parse_mode="Markdown")
 
 
@@ -289,10 +287,10 @@ async def close_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def default_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """/default [name] - 기본 라우팅 세션 설정 또는 해제
+    """/default [name] - 기본 라우팅 세션 변경
 
     /default <이름>  : 이름 없는 메시지를 해당 세션으로 전달
-    /default        : 원래대로 기본 Claude 세션 풀로 전달
+    /default        : .env 기본 세션으로 복원 (이미 기본이면 무시)
     """
     if not await _check_allowed(update, ctx):
         return
@@ -302,23 +300,45 @@ async def default_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
         await update.message.reply_text("❌ 세션 관리자가 초기화되지 않았습니다.")
         return
 
+    from src.shared.named_sessions import NamedSessionNotFoundError
+
     args = ctx.args or []
     if not args:
-        manager.clear_default()
-        await update.message.reply_text(
-            "↩️ 기본 세션 해제됨.\n이름 없는 메시지는 기본 Claude 세션으로 전달됩니다.",
-        )
+        config_default: str | None = ctx.bot_data.get("default_session_name")
+        if not config_default:
+            await update.message.reply_text(
+                "ℹ️ .env에 DEFAULT_SESSION_NAME이 설정되지 않았습니다.\n"
+                "사용법: `/default <세션이름>`",
+                parse_mode="Markdown",
+            )
+            return
+
+        # 이미 .env 기본 세션이면 무시
+        current = manager.default_session
+        if current and current.name == config_default.strip().lower():
+            return
+
+        # 다른 세션이 기본이면 → .env 기본 세션으로 복원
+        try:
+            session = await manager.set_default(config_default)
+            await update.message.reply_text(
+                f"↩️ 기본 세션 복원: *{session.display_name}*",
+                parse_mode="Markdown",
+            )
+        except NamedSessionNotFoundError:
+            await update.message.reply_text(
+                f"❌ 기본 세션 '{config_default}'을 찾을 수 없습니다.",
+            )
         return
 
     name = " ".join(args).strip()
-    from src.shared.named_sessions import NamedSessionNotFoundError
     try:
-        session = manager.set_default(name)
+        session = await manager.set_default(name)
         await update.message.reply_text(
             f"✅ 기본 세션: *{session.display_name}*\n"
             f"📁 `{session.working_dir}`\n\n"
             f"이제 이름 없는 메시지가 이 세션으로 전달됩니다.\n"
-            f"해제: `/default`",
+            f"복원: `/default`",
             parse_mode="Markdown",
         )
     except NamedSessionNotFoundError:
@@ -401,12 +421,11 @@ async def _process_message(
         else:
             chunks = _split_message(reply)
             for i, chunk in enumerate(chunks):
-                header = f"*{session_name}*\n" if session_name and i == 0 else ""
+                header = f"[{session_name}]\n" if session_name and i == 0 else ""
                 await bot.send_message(
                     chat_id=chat_id,
                     text=header + chunk,
                     reply_to_message_id=message_id,
-                    parse_mode="Markdown" if header else None,
                 )
 
     # typing 액션 주기적 갱신
@@ -424,6 +443,7 @@ async def _process_message(
 
     # 이미지 메시지 처리
     if update.message and update.message.photo:
+        from src.shared.named_sessions import NamedSessionManager, NamedSessionNotFoundError
         photo = update.message.photo[-1]
         photo_file = await bot.get_file(photo.file_id)
 
@@ -432,13 +452,36 @@ async def _process_message(
 
         await photo_file.download_to_drive(tmp_path)
         caption = update.message.caption or "이 이미지에 대해 설명해줘"
+        prompt = f"[이미지 첨부됨: image.jpg]\n{caption}"
 
+        img_manager: NamedSessionManager | None = bot_data.get("named_session_manager")
         typing_task = asyncio.create_task(keep_typing())
         try:
-            prompt = f"[이미지 첨부됨: image.jpg]\n{caption}"
-            reply = await session_mod.ask(prompt, save_history=True)
+            sender: str | None = None
+            # 이름 prefix 라우팅 시도 (caption 기준)
+            target = img_manager.parse_address(caption) if img_manager else None
+            if target:
+                session_name, content = target
+                img_prompt = f"[이미지 첨부됨: image.jpg]\n{content}"
+                reply = await img_manager.ask(session_name, img_prompt)
+                sender = session_name
+                ns = img_manager.get(session_name)
+                if store and ns:
+                    _kw = dict(session_name=ns.display_name, session_uid=ns.session_uid, session_id=ns.claude_session_id)
+                    await store.append(role="user", content=img_prompt, **_kw)
+                    await store.append(role="assistant", content=reply, **_kw)
+            elif img_manager and img_manager.default_session is not None:
+                default = img_manager.default_session
+                reply = await img_manager.ask(default.display_name, prompt)
+                sender = default.display_name
+                if store:
+                    _kw = dict(session_name=default.display_name, session_uid=default.session_uid, session_id=default.claude_session_id)
+                    await store.append(role="user", content=prompt, **_kw)
+                    await store.append(role="assistant", content=reply, **_kw)
+            else:
+                reply = await session_mod.ask(prompt, save_history=True)
             await _delete_ack()
-            await _send_reply(reply)
+            await _send_reply(reply, session_name=sender)
         except Exception as e:
             logger.exception("Claude CLI 오류 (이미지)")
             await _delete_ack()
@@ -471,6 +514,12 @@ async def _process_message(
             try:
                 reply = await manager.ask(session_name, content)
                 sender = session_name
+                # named session 이력 저장
+                ns = manager.get(session_name)
+                if store and ns:
+                    _kw = dict(session_name=ns.display_name, session_uid=ns.session_uid, session_id=ns.claude_session_id)
+                    await store.append(role="user", content=content, **_kw)
+                    await store.append(role="assistant", content=reply, **_kw)
             except NamedSessionNotFoundError:
                 reply = f"❌ '{session_name}' 세션을 찾을 수 없습니다. `/session` 으로 세션 목록을 확인하세요."
         elif manager and manager.default_session is not None:
@@ -479,8 +528,13 @@ async def _process_message(
             try:
                 reply = await manager.ask(default.display_name, prompt)
                 sender = default.display_name
+                # default named session 이력 저장
+                if store:
+                    _kw = dict(session_name=default.display_name, session_uid=default.session_uid, session_id=default.claude_session_id)
+                    await store.append(role="user", content=prompt, **_kw)
+                    await store.append(role="assistant", content=reply, **_kw)
             except NamedSessionNotFoundError:
-                manager.clear_default()
+                await manager.clear_default()
                 reply = await session_mod.ask(prompt, save_history=True)
         else:
             # 3. 기본 Claude 세션 풀로 전달

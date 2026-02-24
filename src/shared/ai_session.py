@@ -19,6 +19,7 @@ import asyncio
 import json
 import logging
 import os
+import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -39,8 +40,16 @@ _default_claude_session: "ClaudeSession | None" = None  # 기본 세션 영구 �
 
 
 def _make_working_dir(subdir: str) -> str:
-    """data_dir 아래 서브디렉토리를 생성하고 경로 문자열 반환."""
-    path = _data_dir / subdir
+    """OS별 데이터 디렉토리 아래 서브디렉토리를 생성하고 경로 문자열 반환.
+
+    Windows: %ProgramData%\\Telegram_Claude_Bot\\data\\{subdir}
+    Linux/Docker: {_data_dir}/data/{subdir}
+    """
+    if sys.platform == "win32":
+        program_data = os.environ.get("ProgramData", r"C:\ProgramData")
+        path = Path(program_data) / "Telegram_Claude_Bot" / "data" / subdir
+    else:
+        path = _data_dir / "data" / subdir
     path.mkdir(parents=True, exist_ok=True)
     return str(path)
 
@@ -116,8 +125,9 @@ async def ask(prompt: str, timeout: int = 600, *, save_history: bool = True) -> 
         reply = await session.ask(prompt, timeout=timeout)
 
     if save_history and _history_store is not None:
-        await _history_store.append(role="user", content=prompt)
-        await _history_store.append(role="assistant", content=reply)
+        sid = session.session_id
+        await _history_store.append(role="user", content=prompt, session_id=sid)
+        await _history_store.append(role="assistant", content=reply, session_id=sid)
 
     return reply
 
@@ -203,7 +213,7 @@ class ClaudeSession:
 
         env = os.environ.copy()
         env.pop("CLAUDECODE", None)  # 중첩 세션 차단 우회
-        cwd = self._working_dir or str(Path.cwd())
+        cwd = str(Path(self._working_dir).resolve()) if self._working_dir else str(Path.cwd())
 
         cmd: list[str] = [self._claude_path]
         if resume_session_id:

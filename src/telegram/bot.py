@@ -26,7 +26,7 @@ from src.telegram.handlers.commands import (
     close_command,
     default_command,
     history_command,
-    logs_command, new_command, open_command, session_command,
+    logs_command, new_command, open_command,
     setmodel_command,
     start_command, status_command,
 )
@@ -214,12 +214,14 @@ class TelegramClaudeBot:
         allowed_users: list[int] | None = None,
         history_store: "ChatHistoryStore | None" = None,
         default_session_name: str | None = None,
+        db: "Database | None" = None,
     ) -> None:
         self.token = token
         self.orchestrator = orchestrator
         self.allowed_users = allowed_users or []
         self.history_store = history_store
         self.default_session_name = default_session_name
+        self._db = db
         self.app = Application.builder().token(token).build()
         self._msg_queue: MessageQueue | None = None
         self._register_handlers()
@@ -243,7 +245,6 @@ class TelegramClaudeBot:
             ("history", history_command),
             ("new", new_command),
             ("open", open_command),
-            ("session", session_command),
             ("close", close_command),
             ("default", default_command),
         ]:
@@ -257,6 +258,13 @@ class TelegramClaudeBot:
         """메시지를 큐에 넣고 즉시 수신 확인 메시지 전송"""
         from src.telegram.handlers.commands import _check_allowed
         if not await _check_allowed(update, ctx):
+            return
+
+        # @ 단독 입력 → 세션 목록 표시 (큐에 넣지 않고 즉시 응답)
+        raw_text = (update.message.text or "").strip() if update.message else ""
+        if raw_text == "@":
+            from src.telegram.handlers.commands import _show_session_list
+            await _show_session_list(update, ctx)
             return
 
         chat_id = update.effective_chat.id
@@ -355,17 +363,27 @@ class TelegramClaudeBot:
         self.app.bot_data["orchestrator"] = self.orchestrator
         self.app.bot_data["allowed_users"] = self.allowed_users
         self.app.bot_data["history_store"] = self.history_store
-        named_mgr = NamedSessionManager()
+        self.app.bot_data["default_session_name"] = self.default_session_name
+        named_mgr = NamedSessionManager(db=self._db)
         named_mgr.add_restart_callback(self._on_session_restarted)
         self.app.bot_data["named_session_manager"] = named_mgr
 
+        # DB에서 이전 세션 복원
+        restored = await named_mgr.load_from_db()
+        if restored:
+            logger.info("DB에서 세션 %d개 복원됨", restored)
+
         # 기본 세션 이름이 설정된 경우 named session으로 자동 생성 + default 지정
         if self.default_session_name:
+            from src.shared.ai_session import _make_working_dir
             try:
-                await named_mgr.create(self.default_session_name)
+                await named_mgr.create(
+                    self.default_session_name,
+                    working_dir=_make_working_dir("default"),
+                )
             except ValueError:
-                pass  # 이미 존재하면 무시
-            named_mgr.set_default(self.default_session_name)
+                pass  # 이미 존재하면 무시 (DB에서 복원됨)
+            await named_mgr.set_default(self.default_session_name)
             logger.info("기본 named session 설정: name=%s", self.default_session_name)
 
     async def _on_session_restarted(self, session_name: str, error_msg: str) -> None:

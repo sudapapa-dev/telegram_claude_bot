@@ -5,7 +5,7 @@
 | 방식 | 대상 | 특징 |
 |------|------|------|
 | [일반 Docker](#일반-docker-배포) | Linux 서버, WSL2 | 소스코드에서 직접 빌드 |
-| [Synology NAS](#synology-nas-배포) | Synology NAS (Container Manager) | tar 이미지 기반 배포 |
+| [Synology NAS](#synology-nas-배포) | Synology NAS (Container Manager) | 로컬에서 빌드한 tar 이미지 배포 |
 
 ---
 
@@ -82,7 +82,7 @@ docker-compose down --rmi local   # 이미지까지 제거
 ## Synology NAS 배포
 
 Synology NAS의 **Container Manager** (= Docker)를 사용한 배포 방식입니다.
-소스코드 없이 **tar 이미지 파일**만으로 운영합니다.
+**로컬(Windows)에서 이미지를 빌드**하고, tar 파일로 NAS에 전송하여 운영합니다.
 
 ### NAS 디렉토리 구조
 
@@ -90,7 +90,7 @@ Synology NAS의 **Container Manager** (= Docker)를 사용한 배포 방식입�
 ~/                              ← /volume1/homes/{user}/
 └── .docker/
     ├── images/
-    │   └── telegram_claude_bot.tar     ← 이미지 백업
+    │   └── telegram_claude_bot.tar     ← Docker 이미지 파일
     └── data/
         └── telegram_claude_bot/        ← 컨테이너 데이터
             ├── .env                    ← 봇 설정
@@ -99,7 +99,6 @@ Synology NAS의 **Container Manager** (= Docker)를 사용한 배포 방식입�
             │   └── .db/
             │       └── telegram_claude_bot.db
             ├── workspace/              ← Claude 작업 디렉토리
-            ├── sessions/               ← 세션별 작업 디렉토리
             └── claude_auth/            ← Claude 인증 정보
 ```
 
@@ -107,44 +106,33 @@ Synology NAS의 **Container Manager** (= Docker)를 사용한 배포 방식입�
 - Synology DSM에 **Container Manager** 패키지 설치
 - SSH 접속 가능 (제어판 → 터미널 및 SNMP → SSH 활성화)
 - 관리자(administrators 그룹) 계정
+- 로컬에 Docker Desktop 설치 (이미지 빌드용)
 
-### 1. 빌드 환경 준비 (최초 1회)
+### 1. 로컬에서 이미지 빌드 및 tar 생성
 
-NAS에 SSH 접속 후 소스코드 전송 및 빌드합니다.
+로컬(Windows/Mac/Linux)에서 Docker 이미지를 빌드하고 tar로 저장합니다.
 
 ```bash
-# 로컬(Windows)에서 소스코드를 NAS로 전송하는 Python 스크립트
-# (scp/sftp 대신 paramiko + base64 방식 사용 — Synology SFTP 서브시스템 비활성 대응)
+# 프로젝트 루트에서 실행
+docker build -t telegram_claude_bot:latest -f deploy/docker/Dockerfile .
+
+# tar 파일로 저장
+docker save telegram_claude_bot:latest -o build/telegram_claude_bot.tar
+```
+
+### 2. tar 파일을 NAS로 전송
+
+Windows 파일 탐색기 또는 네트워크 공유를 사용하여 전송합니다.
+
+```
+build/telegram_claude_bot.tar
+  → \\NAS_IP\homes\{USER}\.docker\images\telegram_claude_bot.tar
 ```
 
 > **참고:** Synology NAS는 기본적으로 SFTP 서브시스템이 비활성화되어 있어
-> 일반 `scp` 명령이 작동하지 않을 수 있습니다.
-> paramiko를 이용한 Python 스크립트로 전송합니다.
+> 일반 `scp` 명령이 작동하지 않을 수 있습니다. SMB 공유 폴더를 사용하세요.
 
-### 2. 이미지 빌드 (최초 1회)
-
-NAS에서 SSH로 접속하여 빌드합니다.
-
-```bash
-# sudo 필요 (administrators 그룹 계정)
-echo 'PASSWORD' | sudo -S /usr/local/bin/docker-compose \
-  -f ~/.docker/data/telegram_claude_bot/deploy/docker/docker-compose.yml \
-  build --no-cache
-```
-
-### 3. 이미지를 tar로 저장
-
-빌드 완료 후 이미지를 tar 파일로 저장합니다. (소스코드 없이 재배포 가능)
-
-```bash
-mkdir -p ~/.docker/images
-
-echo 'PASSWORD' | sudo -S /usr/local/bin/docker save \
-  telegram_claude_bot:latest \
-  -o ~/.docker/images/telegram_claude_bot.tar
-```
-
-### 4. .env 파일 설정
+### 3. .env 파일 설정
 
 ```bash
 mkdir -p ~/.docker/data/telegram_claude_bot
@@ -163,7 +151,7 @@ NOTION_TOKEN=
 EOF
 ```
 
-### 5. docker-compose.yml 설정
+### 4. docker-compose.yml 설정
 
 ```yaml
 # ~/.docker/data/telegram_claude_bot/docker-compose.yml
@@ -186,7 +174,6 @@ services:
     volumes:
       - /volume1/homes/{USER}/.docker/data/telegram_claude_bot/data:/app/data
       - /volume1/homes/{USER}/.docker/data/telegram_claude_bot/workspace:/app/workspace
-      - /volume1/homes/{USER}/.docker/data/telegram_claude_bot/sessions:/app/sessions
       - /volume1/homes/{USER}/.docker/data/telegram_claude_bot/claude_auth:/home/appuser/.claude
 
     logging:
@@ -198,7 +185,7 @@ services:
 
 `{USER}`를 실제 NAS 사용자명으로 교체하세요.
 
-### 6. Claude 인증 파일 복사
+### 5. Claude 인증 파일 복사
 
 컨테이너 내 Claude CLI가 인증을 사용하려면 로컬의 `~/.claude/` 내용을 복사해야 합니다.
 
@@ -239,68 +226,80 @@ cp ~/.claude.json /path/to/claude_auth/.claude.json
 copy %USERPROFILE%\.claude.json \\NAS_IP\homes\{USER}\.docker\data\telegram_claude_bot\claude_auth\.claude.json
 ```
 
-### 7. 컨테이너 실행
+### 6. 이미지 로드 및 컨테이너 실행
 
-tar 이미지를 로드하고 컨테이너를 시작합니다.
+NAS에 SSH 접속 후 실행합니다.
 
 ```bash
+DOCKER=/volume1/@appstore/ContainerManager/usr/bin/docker
+
 # 이미지 로드 (최초 또는 이미지 교체 시)
-echo 'PASSWORD' | sudo -S /usr/local/bin/docker load \
+echo 'PASSWORD' | sudo -S $DOCKER load \
   -i ~/.docker/images/telegram_claude_bot.tar
 
 # 데이터 폴더 권한 설정
 chmod -R 777 ~/.docker/data/telegram_claude_bot/data \
              ~/.docker/data/telegram_claude_bot/workspace \
-             ~/.docker/data/telegram_claude_bot/sessions \
              ~/.docker/data/telegram_claude_bot/claude_auth
 
 # 컨테이너 시작
-echo 'PASSWORD' | sudo -S /usr/local/bin/docker-compose \
+echo 'PASSWORD' | sudo -S $DOCKER compose \
   -f ~/.docker/data/telegram_claude_bot/docker-compose.yml up -d
 ```
 
 ### 운영 명령어
 
 ```bash
-COMPOSE="sudo /usr/local/bin/docker-compose -f ~/.docker/data/telegram_claude_bot/docker-compose.yml"
-DOCKER="sudo /usr/local/bin/docker"
+DOCKER=/volume1/@appstore/ContainerManager/usr/bin/docker
+COMPOSE_FILE=~/.docker/data/telegram_claude_bot/docker-compose.yml
 
 # 로그 확인
-echo 'PASSWORD' | $DOCKER logs telegram_claude_bot --tail 50 -f
+echo 'PASSWORD' | sudo -S $DOCKER logs telegram_claude_bot --tail 50 -f
 
 # 재시작
-echo 'PASSWORD' | $DOCKER restart telegram_claude_bot
+echo 'PASSWORD' | sudo -S $DOCKER restart telegram_claude_bot
 
 # 중지
-echo 'PASSWORD' | $COMPOSE down
+echo 'PASSWORD' | sudo -S $DOCKER compose -f $COMPOSE_FILE down
 
 # 상태 확인
-echo 'PASSWORD' | $DOCKER ps
+echo 'PASSWORD' | sudo -S $DOCKER ps
 ```
 
 ### 업데이트 절차
 
-코드 변경 시 새 이미지를 빌드하고 tar를 교체합니다.
+코드 변경 시 로컬에서 새 이미지를 빌드하여 NAS에 배포합니다.
 
 ```bash
-# 1. 소스코드 재전송 (로컬 → NAS)
-# 2. NAS에서 재빌드
-echo 'PASSWORD' | sudo -S /usr/local/bin/docker-compose \
-  -f ~/.docker/data/telegram_claude_bot/deploy/docker/docker-compose.yml build
+# === 로컬(Windows)에서 ===
 
-# 3. 새 tar 저장 (기존 덮어쓰기)
-echo 'PASSWORD' | sudo -S /usr/local/bin/docker save \
-  telegram_claude_bot:latest \
-  -o ~/.docker/images/telegram_claude_bot.tar
+# 1. 이미지 빌드
+docker build -t telegram_claude_bot:latest -f deploy/docker/Dockerfile .
 
-# 4. 소스코드 삭제
-rm -rf ~/.docker/data/telegram_claude_bot/src \
-       ~/.docker/data/telegram_claude_bot/deploy \
-       ~/.docker/data/telegram_claude_bot/pyproject.toml
+# 2. tar 저장
+docker save telegram_claude_bot:latest -o build/telegram_claude_bot.tar
 
-# 5. 컨테이너 재시작
-echo 'PASSWORD' | sudo -S /usr/local/bin/docker restart telegram_claude_bot
+# 3. NAS로 전송 (SMB 공유 또는 파일 탐색기)
+#    build/telegram_claude_bot.tar → \\NAS_IP\homes\{USER}\.docker\images\
+
+# === NAS (SSH)에서 ===
+DOCKER=/volume1/@appstore/ContainerManager/usr/bin/docker
+COMPOSE_FILE=~/.docker/data/telegram_claude_bot/docker-compose.yml
+
+# 4. 이미지 로드
+echo 'PASSWORD' | sudo -S $DOCKER load \
+  -i ~/.docker/images/telegram_claude_bot.tar
+
+# 5. 컨테이너 재생성 (새 이미지 적용)
+echo 'PASSWORD' | sudo -S $DOCKER compose -f $COMPOSE_FILE down
+echo 'PASSWORD' | sudo -S $DOCKER compose -f $COMPOSE_FILE up -d
+
+# 6. 로그 확인
+echo 'PASSWORD' | sudo -S $DOCKER logs telegram_claude_bot --tail 20
 ```
+
+> **주의:** `docker restart`는 기존 컨테이너를 그대로 재시작하므로 새 이미지가 적용되지 않습니다.
+> 반드시 `docker compose down` + `up -d`로 컨테이너를 재생성해야 합니다.
 
 ---
 
@@ -343,11 +342,27 @@ chmod 777 ~/.docker/data/telegram_claude_bot/data/.db
 
 ### Synology에서 docker 명령을 찾을 수 없음
 
-Container Manager의 docker는 `/usr/local/bin/docker`에 있습니다.
-PATH에 없으므로 전체 경로를 사용하거나 sudo를 통해 실행합니다.
+Container Manager의 docker 경로는 DSM 버전에 따라 다릅니다.
 
 ```bash
-/usr/local/bin/docker --version
+# 경로 확인
+which docker || find / -name docker -type f 2>/dev/null | head -5
+
+# 일반적인 경로
+/volume1/@appstore/ContainerManager/usr/bin/docker
+```
+
+### 이미지 교체 후 컨테이너에 반영되지 않음
+
+`docker load`로 새 이미지를 로드한 후 반드시 컨테이너를 **재생성**해야 합니다.
+
+```bash
+# (X) restart는 기존 이미지의 컨테이너를 재시작할 뿐
+docker restart telegram_claude_bot
+
+# (O) down + up으로 새 이미지로 컨테이너 재생성
+docker compose -f $COMPOSE_FILE down
+docker compose -f $COMPOSE_FILE up -d
 ```
 
 ### 포트 충돌

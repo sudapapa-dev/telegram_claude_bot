@@ -1,6 +1,9 @@
-# Telegram Claude Bot - NSSM 기반 서비스 등록 스크립트
+﻿# Telegram Claude Bot - NSSM 기반 서비스 등록 스크립트
 # 이 파일을 telegram_claude_bot.exe 와 같은 폴더에 복사해서 사용하세요.
 # 우클릭 -> "PowerShell로 실행" 또는 관리자 PowerShell에서 실행
+
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$OutputEncoding = [System.Text.Encoding]::UTF8
 
 $ServiceName = "TelegramClaudeBot"
 $DisplayName = "Telegram Claude Bot"

@@ -4,8 +4,7 @@ import os
 # 프로젝트 루트 (spec 파일 위치 기준 두 단계 위)
 _HERE = os.path.dirname(os.path.abspath(SPEC))
 _ROOT = os.path.abspath(os.path.join(_HERE, '..', '..'))
-_RELEASE = os.path.join(_ROOT, 'build')
-_WORKPATH = os.path.join(_ROOT, 'build', '.tmp')
+_DIST = os.path.join(_ROOT, 'dist')
 
 # src/assets 폴더가 존재할 때만 datas에 포함
 _assets_src = os.path.join(_ROOT, 'src', 'assets')
@@ -36,6 +35,7 @@ a = Analysis(
         'src.shared.events',
         'src.shared.ai_session',
         'src.shared.chat_history',
+        'src.shared.named_sessions',
         'src.orchestrator.manager',
         'src.orchestrator.process',
         'src.orchestrator.queue',
@@ -84,7 +84,7 @@ coll = COLLECT(
 
 # 빌드 후: 배포 파일들을 EXE 옆에 복사
 import shutil
-_dist_dir = os.path.join(_RELEASE, 'telegram_claude_bot')
+_dist_dir = os.path.join(_DIST, 'telegram_claude_bot')
 _win_deploy = os.path.join(_ROOT, 'deploy', 'windows')
 
 _copy_files = [
