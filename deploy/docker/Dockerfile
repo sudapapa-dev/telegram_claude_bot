@@ -9,8 +9,8 @@ RUN apt-get update && apt-get install -y \
     && apt-get install -y nodejs \
     && rm -rf /var/lib/apt/lists/*
 
-# Claude Code CLI 설치 (필수)
-RUN npm install -g @anthropic-ai/claude-code
+# AI CLI 도구 설치
+RUN npm install -g @anthropic-ai/claude-code @openai/codex @google/gemini-cli
 
 # Notion MCP 설치
 RUN npm install -g @notionhq/notion-mcp-server
@@ -34,8 +34,8 @@ RUN find /app/src -type d -exec chmod 755 {} \; && \
 
 # 필요 디렉토리 생성 및 권한 설정
 RUN mkdir -p /app/scripts /app/data/.db /app/workspace /app/sessions && \
-    mkdir -p /home/appuser/.claude && \
-    chown -R appuser:appuser /app /home/appuser/.claude
+    mkdir -p /home/appuser/.claude /home/appuser/.codex /home/appuser/.gemini && \
+    chown -R appuser:appuser /app /home/appuser/.claude /home/appuser/.codex /home/appuser/.gemini
 
 # entrypoint 복사 (USER 변경 전 root로)
 COPY deploy/docker/entrypoint.sh /app/entrypoint.sh

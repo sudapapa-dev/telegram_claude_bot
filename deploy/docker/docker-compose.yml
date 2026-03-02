@@ -31,6 +31,10 @@ services:
       # Claude CLI 인증 정보 영속화
       # .credentials.json 만 복사하면 인증 완료 (docker restart 로 반영)
       - ./claude_auth:/home/appuser/.claude
+      # Codex (GPT) 인증 정보 영속화
+      - ./codex_auth:/home/appuser/.codex
+      # Gemini 인증 정보 영속화
+      - ./gemini_auth:/home/appuser/.gemini
 
     logging:
       driver: "json-file"

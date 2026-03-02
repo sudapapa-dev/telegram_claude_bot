@@ -27,6 +27,8 @@ a = Analysis(
         'src.shared.ai_session',
         'src.shared.chat_history',
         'src.shared.named_sessions',
+        'src.shared.codex_auth',
+        'src.shared.gemini_auth',
         'src.telegram.bot',
         'src.telegram.handlers.commands',
     ],

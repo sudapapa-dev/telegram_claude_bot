@@ -5,7 +5,7 @@ from pathlib import Path
 
 import aiosqlite
 
-from src.shared.models import ChatMessage, NamedSession, NamedSessionStatus
+from src.shared.models import AIEngine, ChatMessage, NamedSession, NamedSessionStatus
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +28,9 @@ CREATE TABLE IF NOT EXISTS named_sessions (
     claude_session_id TEXT,
     is_default INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
-    message_count INTEGER NOT NULL DEFAULT 0
+    message_count INTEGER NOT NULL DEFAULT 0,
+    last_used_at TEXT,
+    last_error TEXT
 );
 """
 
@@ -66,6 +68,19 @@ class Database:
             if col not in columns:
                 await db.execute(f"ALTER TABLE chat_history ADD COLUMN {col} TEXT")
                 logger.info("chat_history 마이그레이션: %s 컬럼 추가", col)
+
+        # named_sessions에 engine 컬럼 추가
+        async with db.execute("PRAGMA table_info(named_sessions)") as cur:
+            ns_columns = {row["name"] for row in await cur.fetchall()}
+        if "engine" not in ns_columns:
+            await db.execute(
+                "ALTER TABLE named_sessions ADD COLUMN engine TEXT NOT NULL DEFAULT 'claude'"
+            )
+            logger.info("named_sessions 마이그레이션: engine 컬럼 추가")
+        for col in ("last_used_at", "last_error"):
+            if col not in ns_columns:
+                await db.execute(f"ALTER TABLE named_sessions ADD COLUMN {col} TEXT")
+                logger.info("named_sessions 마이그레이션: %s 컬럼 추가", col)
 
     async def close(self) -> None:
         if self._db:
@@ -116,15 +131,17 @@ class Database:
     async def save_named_session(self, session: NamedSession, is_default: bool = False) -> None:
         """이름 세션 저장 (INSERT OR REPLACE)"""
         db = _require_db(self._db)
+        last_used_at = session.last_used_at.isoformat() if session.last_used_at else None
         await db.execute(
             "INSERT OR REPLACE INTO named_sessions"
-            " (name, display_name, session_uid, working_dir, claude_session_id,"
-            "  is_default, created_at, message_count)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (session.name, session.display_name, session.session_uid,
-             session.working_dir, session.claude_session_id,
+            " (name, display_name, engine, session_uid, working_dir, claude_session_id,"
+            "  is_default, created_at, message_count, last_used_at, last_error)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (session.name, session.display_name, session.engine.value,
+             session.session_uid, session.working_dir, session.claude_session_id,
              1 if is_default else 0,
-             session.created_at.isoformat(), session.message_count),
+             session.created_at.isoformat(), session.message_count,
+             last_used_at, session.last_error),
         )
         await db.commit()
 
@@ -143,15 +160,20 @@ class Database:
             rows = await cur.fetchall()
             result = []
             for r in rows:
+                engine_val = r["engine"] if "engine" in r.keys() else "claude"
+                keys = r.keys()
                 session = NamedSession(
                     name=r["name"],
                     display_name=r["display_name"],
+                    engine=AIEngine(engine_val),
                     session_uid=r["session_uid"],
                     working_dir=r["working_dir"],
                     claude_session_id=r["claude_session_id"],
                     created_at=r["created_at"],
                     message_count=r["message_count"],
                     status=NamedSessionStatus.IDLE,
+                    last_used_at=r["last_used_at"] if "last_used_at" in keys else None,
+                    last_error=r["last_error"] if "last_error" in keys else None,
                 )
                 result.append((session, bool(r["is_default"])))
             return result

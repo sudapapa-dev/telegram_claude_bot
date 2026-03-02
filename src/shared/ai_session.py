@@ -446,3 +446,285 @@ def _parse_output(raw: str) -> tuple[str, str | None]:
     except (json.JSONDecodeError, KeyError, TypeError):
         pass
     return raw, None
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Gemini CLI 세션
+# ────────────────────────────────────────────────────────────────────────────
+
+
+class GeminiSession:
+    """Gemini CLI 세션 (단발 실행 + resume으로 대화 연속성 유지).
+
+    실행 패턴:
+        gemini --resume <session_id> -p "prompt" -o stream-json --yolo -C <working_dir>
+    첫 실행 시에는 --resume 없이 실행하여 session_id를 획득.
+    """
+
+    def __init__(
+        self,
+        gemini_path: str | None = None,
+        model: str | None = None,
+        working_dir: str | None = None,
+        system_prompt: str | None = None,
+    ) -> None:
+        from src.shared.gemini_auth import find_gemini_path
+        self._gemini_path = gemini_path or find_gemini_path() or "gemini"
+        self._model = model
+        self._working_dir = working_dir or _make_working_dir("default")
+        self._system_prompt = system_prompt or ""
+        self.session_id: str | None = None
+
+    def is_alive(self) -> bool:
+        """Gemini는 단발 실행이므로 항상 True (세션 관리자 호환)."""
+        return True
+
+    async def start(self, resume_session_id: str | None = None) -> None:
+        """세션 ID 복원 (프로세스 기동 없음)."""
+        if resume_session_id:
+            self.session_id = resume_session_id
+
+    async def ask(
+        self,
+        prompt: str,
+        timeout: int = 1200,
+        system_prompt: str | None = None,
+        resume_session_id: str | None = None,
+    ) -> str:
+        """Gemini CLI를 단발 실행하여 응답 반환."""
+        if resume_session_id and not self.session_id:
+            self.session_id = resume_session_id
+
+        effective_system = system_prompt if system_prompt is not None else self._system_prompt
+        if effective_system:
+            full_prompt = f"{effective_system}\n\n{prompt}"
+        else:
+            full_prompt = prompt
+
+        env = os.environ.copy()
+        cwd = str(Path(self._working_dir).resolve())
+        Path(cwd).mkdir(parents=True, exist_ok=True)
+
+        cmd: list[str] = [self._gemini_path]
+        if self.session_id:
+            cmd += ["--resume", self.session_id]
+        cmd += ["-p", full_prompt, "-o", "stream-json", "--yolo"]
+        if self._model:
+            cmd += ["-m", self._model]
+
+        logger.info(
+            "GeminiSession 실행: resume=%s, prompt_len=%d, cwd=%s",
+            bool(self.session_id), len(prompt), cwd,
+        )
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                cwd=cwd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=env,
+            )
+        except FileNotFoundError:
+            raise RuntimeError(
+                f"Gemini CLI를 찾을 수 없습니다: {self._gemini_path}\n"
+                "`npm install -g @google/gemini-cli` 로 설치하세요."
+            )
+
+        try:
+            async with asyncio.timeout(timeout):
+                stdout_data, stderr_data = await proc.communicate()
+        except TimeoutError:
+            proc.kill()
+            raise TimeoutError(f"Gemini 응답 타임아웃 ({timeout}초 초과)")
+
+        if proc.returncode != 0:
+            err = stderr_data.decode(errors="replace").strip()
+            raise RuntimeError(f"Gemini CLI 오류 (code={proc.returncode}): {err}")
+
+        # stdout NDJSON 파싱
+        result_text = ""
+        fallback_text = ""  # result 이벤트에서 추출한 텍스트 (message 이벤트 없을 때 사용)
+        for line in stdout_data.decode(errors="replace").splitlines():
+            event = _parse_event(line)
+            if event is None:
+                continue
+            etype = event.get("type", "")
+            if etype == "init":
+                new_sid = event.get("session_id")
+                if new_sid:
+                    self.session_id = new_sid
+            elif etype == "message" and event.get("role") == "assistant":
+                content = event.get("content", "")
+                if isinstance(content, list):
+                    # content가 블록 배열인 경우: [{"type":"text","text":"..."}]
+                    for block in content:
+                        if isinstance(block, dict) and block.get("type") == "text":
+                            result_text += block.get("text", "")
+                elif content:
+                    result_text += str(content)
+            elif etype == "result":
+                # result 이벤트에서 텍스트 추출 (CLI 버전별 필드명 차이 대응)
+                for field in ("response", "result", "text", "content"):
+                    val = event.get(field, "")
+                    if isinstance(val, str) and val:
+                        fallback_text += val
+                        break
+                    elif isinstance(val, list):
+                        for block in val:
+                            if isinstance(block, dict) and block.get("type") == "text":
+                                fallback_text += block.get("text", "")
+
+        # message 이벤트에서 텍스트를 못 얻었으면 result 이벤트 텍스트 사용
+        if not result_text and fallback_text:
+            result_text = fallback_text
+
+        if not result_text:
+            stderr_preview = stderr_data.decode(errors="replace").strip()[:300]
+            raise RuntimeError(
+                f"Gemini 응답이 비어있습니다."
+                + (f"\nstderr: {stderr_preview}" if stderr_preview else "")
+            )
+
+        logger.info(
+            "GeminiSession 응답: session_id=%s, reply_len=%d",
+            self.session_id, len(result_text),
+        )
+        return result_text
+
+    async def stop(self) -> None:
+        """단발 실행이므로 정리 불필요."""
+        pass
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Codex (GPT) CLI 세션
+# ────────────────────────────────────────────────────────────────────────────
+
+
+class CodexSession:
+    """Codex CLI 세션 (단발 실행 + resume으로 대화 연속성 유지).
+
+    실행 패턴:
+        첫 실행: codex exec --json --skip-git-repo-check
+                 --dangerously-bypass-approvals-and-sandbox "prompt"
+        이후:    codex exec resume <thread_id> "prompt" --json
+                 --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox
+    """
+
+    def __init__(
+        self,
+        codex_path: str | None = None,
+        model: str | None = None,
+        working_dir: str | None = None,
+        system_prompt: str | None = None,
+    ) -> None:
+        from src.shared.codex_auth import find_codex_path
+        self._codex_path = codex_path or find_codex_path() or "codex"
+        self._model = model
+        self._working_dir = working_dir or _make_working_dir("default")
+        self._system_prompt = system_prompt or ""
+        self.session_id: str | None = None  # thread_id
+
+    def is_alive(self) -> bool:
+        """Codex는 단발 실행이므로 항상 True (세션 관리자 호환)."""
+        return True
+
+    async def start(self, resume_session_id: str | None = None) -> None:
+        """세션 ID 복원 (프로세스 기동 없음)."""
+        if resume_session_id:
+            self.session_id = resume_session_id
+
+    async def ask(
+        self,
+        prompt: str,
+        timeout: int = 1200,
+        system_prompt: str | None = None,
+        resume_session_id: str | None = None,
+    ) -> str:
+        """Codex CLI를 단발 실행하여 응답 반환."""
+        if resume_session_id and not self.session_id:
+            self.session_id = resume_session_id
+
+        effective_system = system_prompt if system_prompt is not None else self._system_prompt
+        if effective_system:
+            full_prompt = f"{effective_system}\n\n{prompt}"
+        else:
+            full_prompt = prompt
+
+        env = os.environ.copy()
+        cwd = str(Path(self._working_dir).resolve())
+        Path(cwd).mkdir(parents=True, exist_ok=True)
+
+        cmd: list[str] = [self._codex_path]
+        if self.session_id:
+            cmd += ["exec", "resume", self.session_id, full_prompt]
+        else:
+            cmd += ["exec", full_prompt]
+        cmd += [
+            "--json",
+            "--skip-git-repo-check",
+            "--dangerously-bypass-approvals-and-sandbox",
+        ]
+        if self._model:
+            cmd += ["-m", self._model]
+
+        logger.info(
+            "CodexSession 실행: resume=%s, prompt_len=%d, cwd=%s",
+            bool(self.session_id), len(prompt), cwd,
+        )
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                cwd=cwd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=env,
+            )
+        except FileNotFoundError:
+            raise RuntimeError(
+                f"Codex CLI를 찾을 수 없습니다: {self._codex_path}\n"
+                "`npm install -g @openai/codex` 로 설치하세요."
+            )
+
+        try:
+            async with asyncio.timeout(timeout):
+                stdout_data, stderr_data = await proc.communicate()
+        except TimeoutError:
+            proc.kill()
+            raise TimeoutError(f"Codex 응답 타임아웃 ({timeout}초 초과)")
+
+        if proc.returncode != 0:
+            err = stderr_data.decode(errors="replace").strip()
+            raise RuntimeError(f"Codex CLI 오류 (code={proc.returncode}): {err}")
+
+        # stdout NDJSON 파싱
+        result_text = ""
+        for line in stdout_data.decode(errors="replace").splitlines():
+            event = _parse_event(line)
+            if event is None:
+                continue
+            etype = event.get("type", "")
+            if etype == "thread.started":
+                tid = event.get("thread_id")
+                if tid:
+                    self.session_id = tid
+            elif etype == "item.completed":
+                item = event.get("item", {})
+                text = item.get("text", "")
+                if text:
+                    result_text += text
+
+        if not result_text:
+            raise RuntimeError("Codex 응답이 비어있습니다.")
+
+        logger.info(
+            "CodexSession 응답: thread_id=%s, reply_len=%d",
+            self.session_id, len(result_text),
+        )
+        return result_text
+
+    async def stop(self) -> None:
+        """단발 실행이므로 정리 불필요."""
+        pass

@@ -12,6 +12,7 @@ from telegram.ext import (
 )
 
 from src.shared.chat_history import ChatHistoryStore
+from src.shared.models import AIEngine
 from src.shared.named_sessions import NamedSessionManager
 
 if TYPE_CHECKING:
@@ -19,10 +20,17 @@ if TYPE_CHECKING:
 
 from src.telegram.handlers.commands import (
     clean_command,
+    close_all_command,
+    close_claude_command,
     close_command,
+    close_gemini_command,
+    close_gpt_command,
     default_command,
     history_command,
-    new_command, open_command,
+    login_command,
+    logout_command,
+    new_command,
+    open_command, open_claude_command, open_gemini_command, open_gpt_command,
     start_command, status_command,
 )
 
@@ -41,6 +49,7 @@ class _QueuedMessage:
     ack_message_id: int | None = field(default=None)
     text_preview: str = ""      # 메시지 내용 앞부분 (표시용)
     target_session: str = ""    # 라우팅 대상 세션 이름 (기본세션이면 빈 문자열)
+    engine_icon: str = ""       # 엔진 아이콘 (🟣💎🤖, 표시용)
     enqueued_at: float = field(default_factory=lambda: __import__("time").monotonic())
     started_at: float | None = None  # 처리 시작 시각 (monotonic)
 
@@ -97,6 +106,7 @@ class MessageQueue:
         ack_message_id: int | None,
         text_preview: str = "",
         target_session: str = "",
+        engine_icon: str = "",
     ) -> None:
         """메시지를 큐에 추가."""
         item = _QueuedMessage(
@@ -107,6 +117,7 @@ class MessageQueue:
             ack_message_id=ack_message_id,
             text_preview=text_preview[:20],
             target_session=target_session,
+            engine_icon=engine_icon,
         )
         await self._queue.put(item)
         logger.info(
@@ -137,10 +148,11 @@ class MessageQueue:
 
         for item in self._processing:
             started = item.started_at or item.enqueued_at
+            target_label = f"{item.engine_icon}{item.target_session}" if item.target_session else "(기본)"
             jobs.append({
                 "status": "처리중",
                 "message_id": item.message_id,
-                "target": item.target_session or "(기본)",
+                "target": target_label,
                 "elapsed": int(now - started),
                 "started_at": _to_wallclock(started),
                 "text": item.text_preview,
@@ -148,10 +160,11 @@ class MessageQueue:
 
         try:
             for item in list(self._queue._queue):  # type: ignore[attr-defined]
+                target_label = f"{item.engine_icon}{item.target_session}" if item.target_session else "(기본)"
                 jobs.append({
                     "status": "대기중",
                     "message_id": item.message_id,
-                    "target": item.target_session or "(기본)",
+                    "target": target_label,
                     "elapsed": int(now - item.enqueued_at),
                     "started_at": "-",
                     "text": item.text_preview,
@@ -246,13 +259,29 @@ class TelegramClaudeBot:
             ("history", history_command),
             ("new", new_command),
             ("open", open_command),
+            ("open_claude", open_claude_command),
+            ("open_gemini", open_gemini_command),
+            ("open_gpt", open_gpt_command),
             ("close", close_command),
+            ("close_claude", close_claude_command),
+            ("close_gemini", close_gemini_command),
+            ("close_gpt", close_gpt_command),
+            ("close_all", close_all_command),
             ("default", default_command),
+            ("login", login_command),
+            ("logout", logout_command),
         ]:
             self.app.add_handler(CommandHandler(name, handler))
         self.app.add_handler(CommandHandler("job", self._job_command))
         self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._enqueue_handler))
         self.app.add_handler(MessageHandler(filters.PHOTO, self._enqueue_handler))
+
+    # 세션 목록 트리거 (@ 단독 입력 → 세션 목록 표시)
+    _SESSION_LIST_TRIGGERS: dict[str, AIEngine | None] = {
+        "@": None,             # 전체 (Claude + Gemini + GPT)
+        "@@": AIEngine.GEMINI,
+        "@@@": AIEngine.CODEX,
+    }
 
     async def _enqueue_handler(self, update, ctx) -> None:
         """메시지를 큐에 넣고 즉시 수신 확인 메시지 전송"""
@@ -260,11 +289,13 @@ class TelegramClaudeBot:
         if not await _check_allowed(update, ctx):
             return
 
-        # @ 단독 입력 → 세션 목록 표시 (큐에 넣지 않고 즉시 응답)
         raw_text = (update.message.text or "").strip() if update.message else ""
-        if raw_text == "@":
+
+        # 세션 목록 표시 트리거 (@ 단독 → 전체 목록)
+        if raw_text in self._SESSION_LIST_TRIGGERS:
             from src.telegram.handlers.commands import _show_session_list
-            await _show_session_list(update, ctx)
+            engine_filter = self._SESSION_LIST_TRIGGERS[raw_text]
+            await _show_session_list(update, ctx, engine_filter=engine_filter)
             return
 
         chat_id = update.effective_chat.id
@@ -273,17 +304,22 @@ class TelegramClaudeBot:
         if self._msg_queue:
             raw_text = (update.message.text or update.message.caption or "") if update.message else ""
             # target_session 미리 파악 (표시 목적)
-            named_mgr = ctx.bot_data.get("named_session_manager")
+            named_mgr: NamedSessionManager | None = ctx.bot_data.get("named_session_manager")
             target_session = ""
+            engine_icon = ""
             if named_mgr:
-                parsed = named_mgr.parse_address(raw_text)
-                if parsed:
-                    target_session = parsed[0]
+                parsed_full = named_mgr.parse_address_full(raw_text)
+                if parsed_full:
+                    session_name, _, engine = parsed_full
+                    target_session = session_name
+                    engine_icon = named_mgr.ENGINE_ICONS.get(engine, "")
                 elif named_mgr.default_session:
-                    target_session = named_mgr.default_session.display_name
+                    default = named_mgr.default_session
+                    target_session = default.display_name
+                    engine_icon = named_mgr.ENGINE_ICONS.get(default.engine, "")
 
-            # ACK 메시지 전송 (세션 이름 포함)
-            session_label = f"[{target_session}] " if target_session else ""
+            # ACK 메시지 전송 (엔진 아이콘 + 세션 이름 포함)
+            session_label = f"[{engine_icon}{target_session}] " if target_session else ""
             ack = await update.message.reply_text(f"⏳ {session_label}처리 중...")
 
             await self._msg_queue.enqueue(
@@ -294,6 +330,7 @@ class TelegramClaudeBot:
                 ack_message_id=ack.message_id,
                 text_preview=raw_text,
                 target_session=target_session,
+                engine_icon=engine_icon,
             )
 
     async def _job_command(self, update, ctx) -> None:
