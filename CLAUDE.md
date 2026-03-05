@@ -102,6 +102,43 @@ pyinstaller deploy/windows/telegram_claude_bot.spec --clean --noconfirm --workpa
 # install.bat 실행 → 환경 설치 → telegram_claude_bot.exe 실행
 ```
 
+### Docker 이미지 빌드 및 NAS 배포
+
+WSL2의 Docker 엔진을 사용. 프로젝트 루트에서 실행.
+
+```bash
+# 1. 이미지 빌드 (WSL2)
+wsl -e bash -c "docker build -f /mnt/d/telegram_ai_bot/deploy/docker/Dockerfile -t telegram_claude_bot:latest /mnt/d/telegram_ai_bot"
+
+# 2. tar export → dist/
+wsl -e bash -c "docker save telegram_claude_bot:latest | gzip > /mnt/d/telegram_ai_bot/dist/telegram_claude_bot.tar"
+
+# 3. Y드라이브(NAS SMB)로 복사
+cp D:/telegram_ai_bot/dist/telegram_claude_bot.tar "Y:/.docker/images/telegram_claude_bot.tar"
+
+# 4. NAS SSH로 load + 컨테이너 재생성
+#    SSH 키: ~/.ssh/id_ed25519 (WSL 홈에 복사 후 chmod 600 필요)
+wsl -e bash -c "
+cp /mnt/c/Users/user/.ssh/id_ed25519 ~/id_ed25519_tmp && chmod 600 ~/id_ed25519_tmp
+cat > /tmp/nas_deploy.sh << 'SCRIPT'
+DOCKER=/volume1/@appstore/ContainerManager/usr/bin/docker
+COMPOSE_FILE=/volume1/homes/b17314/.docker/data/telegram_claude_bot/docker-compose.yml
+echo 'NAS_PASSWORD' | sudo -S \$DOCKER load -i /volume1/homes/b17314/.docker/images/telegram_claude_bot.tar
+echo 'NAS_PASSWORD' | sudo -S \$DOCKER compose -f \$COMPOSE_FILE down
+echo 'NAS_PASSWORD' | sudo -S \$DOCKER compose -f \$COMPOSE_FILE up -d
+SCRIPT
+ssh -i ~/id_ed25519_tmp -o StrictHostKeyChecking=no b17314@172.16.42.99 'bash -s' < /tmp/nas_deploy.sh
+"
+```
+
+#### NAS 정보
+- IP: `172.16.42.99`, User: `b17314`
+- SSH 키: `~/.ssh/id_ed25519` (NAS authorized_keys에 등록됨)
+- Docker 경로: `/volume1/@appstore/ContainerManager/usr/bin/docker`
+- 이미지 경로: `/volume1/homes/b17314/.docker/images/telegram_claude_bot.tar`
+- compose 파일: `/volume1/homes/b17314/.docker/data/telegram_claude_bot/docker-compose.yml`
+- 비밀번호 파일: `.password` (프로젝트 루트)
+
 ## Coding Conventions
 - Type hints 필수 (Python 3.11+ style)
 - async/await 패턴 우선

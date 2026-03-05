@@ -700,6 +700,29 @@ class NamedSessionManager:
 
         return None
 
+    def parse_broadcast(self, text: str) -> tuple[str, str] | None:
+        """@@@@이름 형식 파싱 — 해당 이름의 모든 엔진 세션에 브로드캐스트.
+
+        Returns:
+            (display_name, content) 튜플, 또는 매칭 실패 시 None.
+            display_name은 이름 부분 (엔진 무관).
+        """
+        m = re.match(r'^(@{4})([^@\s]\S*)\s+(.+)$', text.strip(), re.DOTALL)
+        if not m:
+            return None
+
+        candidate = m.group(2).strip()
+        content = m.group(3).strip()
+        if not content:
+            return None
+
+        # 해당 이름으로 등록된 세션이 하나라도 있어야 함
+        matches = [s for s in self._sessions.values() if s.display_name.lower() == candidate.lower()]
+        if not matches:
+            return None
+
+        return (matches[0].display_name, content)
+
     def parse_address_full(self, text: str) -> tuple[str, str, AIEngine] | None:
         """parse_address 확장 버전 — 엔진 정보도 함께 반환.
 

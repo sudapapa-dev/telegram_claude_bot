@@ -25,13 +25,14 @@ from src.telegram.handlers.commands import (
     close_command,
     close_gemini_command,
     close_gpt_command,
-    default_command,
     history_command,
     login_command,
     logout_command,
     new_command,
     open_command, open_claude_command, open_gemini_command, open_gpt_command,
+    session_command,
     start_command, status_command,
+    wol_command,
 )
 
 logger = logging.getLogger(__name__)
@@ -239,14 +240,14 @@ class TelegramClaudeBot:
         token: str,
         allowed_users: list[int] | None = None,
         history_store: ChatHistoryStore | None = None,
-        default_session_name: str | None = None,
         db: Database | None = None,
+        default_session_name: str | None = None,
     ) -> None:
         self.token = token
         self.allowed_users = allowed_users or []
         self.history_store = history_store
-        self.default_session_name = default_session_name
         self._db = db
+        self._default_session_name = default_session_name or "default"
         self.app = Application.builder().token(token).build()
         self._msg_queue: MessageQueue | None = None
         self._register_handlers()
@@ -267,9 +268,10 @@ class TelegramClaudeBot:
             ("close_gemini", close_gemini_command),
             ("close_gpt", close_gpt_command),
             ("close_all", close_all_command),
-            ("default", default_command),
+            ("session", session_command),
             ("login", login_command),
             ("logout", logout_command),
+            ("wol", wol_command),
         ]:
             self.app.add_handler(CommandHandler(name, handler))
         self.app.add_handler(CommandHandler("job", self._job_command))
@@ -279,8 +281,6 @@ class TelegramClaudeBot:
     # 세션 목록 트리거 (@ 단독 입력 → 세션 목록 표시)
     _SESSION_LIST_TRIGGERS: dict[str, AIEngine | None] = {
         "@": None,             # 전체 (Claude + Gemini + GPT)
-        "@@": AIEngine.GEMINI,
-        "@@@": AIEngine.CODEX,
     }
 
     async def _enqueue_handler(self, update, ctx) -> None:
@@ -308,15 +308,16 @@ class TelegramClaudeBot:
             target_session = ""
             engine_icon = ""
             if named_mgr:
-                parsed_full = named_mgr.parse_address_full(raw_text)
-                if parsed_full:
-                    session_name, _, engine = parsed_full
-                    target_session = session_name
-                    engine_icon = named_mgr.ENGINE_ICONS.get(engine, "")
-                elif named_mgr.default_session:
-                    default = named_mgr.default_session
-                    target_session = default.display_name
-                    engine_icon = named_mgr.ENGINE_ICONS.get(default.engine, "")
+                broadcast = named_mgr.parse_broadcast(raw_text)
+                if broadcast:
+                    target_session = broadcast[0]
+                    engine_icon = "📢"
+                else:
+                    parsed_full = named_mgr.parse_address_full(raw_text)
+                    if parsed_full:
+                        session_name, _, engine = parsed_full
+                        target_session = session_name
+                        engine_icon = named_mgr.ENGINE_ICONS.get(engine, "")
 
             # ACK 메시지 전송 (엔진 아이콘 + 세션 이름 포함)
             session_label = f"[{engine_icon}{target_session}] " if target_session else ""
@@ -386,7 +387,7 @@ class TelegramClaudeBot:
     async def initialize(self) -> None:
         self.app.bot_data["allowed_users"] = self.allowed_users
         self.app.bot_data["history_store"] = self.history_store
-        self.app.bot_data["default_session_name"] = self.default_session_name
+        self.app.bot_data["default_session_name"] = self._default_session_name
         named_mgr = NamedSessionManager(db=self._db)
         named_mgr.add_restart_callback(self._on_session_restarted)
         self.app.bot_data["named_session_manager"] = named_mgr
@@ -396,18 +397,14 @@ class TelegramClaudeBot:
         if restored:
             logger.info("DB에서 세션 %d개 복원됨", restored)
 
-        # 기본 세션 이름이 설정된 경우 named session으로 자동 생성 + default 지정
-        if self.default_session_name:
-            from src.shared.ai_session import _make_working_dir
-            try:
-                await named_mgr.create(
-                    self.default_session_name,
-                    working_dir=_make_working_dir("default"),
-                )
-            except ValueError:
-                pass  # 이미 존재하면 무시 (DB에서 복원됨)
-            await named_mgr.set_default(self.default_session_name)
-            logger.info("기본 named session 설정: name=%s", self.default_session_name)
+        # DEFAULT_SESSION_NAME Claude 세션이 없으면 생성하고 기본 세션으로 설정
+        name = self._default_session_name
+        if named_mgr.get(name, engine=AIEngine.CLAUDE) is None:
+            session = await named_mgr.create(name, engine=AIEngine.CLAUDE)
+            logger.info("기본 세션 자동 생성: %s", session.display_name)
+        await named_mgr.set_default(name, engine=AIEngine.CLAUDE)
+        logger.info("기본 세션 설정: %s", name)
+
 
     async def _on_session_restarted(self, session_name: str, error_msg: str) -> None:
         """DEAD 세션 자동 재시작 시 사용자에게 알림"""
@@ -432,10 +429,8 @@ class TelegramClaudeBot:
         await self.app.updater.start_polling()
         # 시작 알림
         default = named_mgr.default_session
-        if default:
-            msg = f"🚀 봇이 시작되었습니다. {default.display_name}에게 명령을 내려주세요 😊"
-        else:
-            msg = "🚀 봇이 시작되었습니다."
+        default_info = f"\n기본 세션: 🟣 {default.display_name}" if default else ""
+        msg = f"🚀 봇이 시작되었습니다.{default_info}"
         for cid in self.allowed_users:
             try:
                 await self.app.bot.send_message(chat_id=cid, text=msg)

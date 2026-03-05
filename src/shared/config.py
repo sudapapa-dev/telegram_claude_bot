@@ -49,7 +49,6 @@ class Settings(BaseSettings):
     # Claude
     claude_code_path: str = "claude"
     default_model: str = ""                 # 비어있으면 Claude Code CLI 기본 모델 사용
-    default_session_name: str = "suho"     # 기본 세션 표시 이름 (.env에서만 변경 가능)
 
     @field_validator("claude_code_path", mode="after")
     @classmethod
@@ -116,17 +115,11 @@ class Settings(BaseSettings):
         logger.warning("claude CLI를 찾지 못했습니다. 기본값 '%s' 사용", v)
         return v
 
-    @field_validator("default_session_name", mode="before")
-    @classmethod
-    def _default_session_name_fallback(cls, v: str) -> str:
-        """공백만 있거나 빈 문자열이면 'suho'로 대체"""
-        if not v or not v.strip():
-            return "suho"
-        return v.strip()
-
     # 사전 프롬프트 — SYSTEM_PROMPT 단일 또는 SYSTEM_PROMPT_1~N 다중 설정 지원
     # 다중 설정 시 번호 순서대로 줄바꿈으로 합쳐서 사용
     system_prompts: list[str] = []
+
+    default_session_name: str = ""          # 시작 시 자동 생성할 기본 세션 이름
 
     database_path: str = "./telegram_claude_bot.db"
 

@@ -3,7 +3,6 @@
 Test targets:
   - src/shared/models.py          -- AIEngine enum
   - src/shared/named_sessions.py  -- NamedSessionManager multi-engine features
-  - src/telegram/handlers/commands.py -- _parse_engine_prefix helper
 """
 from __future__ import annotations
 
@@ -12,10 +11,10 @@ from unittest.mock import AsyncMock, patch
 
 from src.shared.models import AIEngine, NamedSession, NamedSessionStatus
 from src.shared.named_sessions import (
+    AmbiguousSessionError,
     NamedSessionManager,
     NamedSessionNotFoundError,
 )
-from src.telegram.handlers.commands import _parse_engine_prefix
 
 
 # ============================================================================
@@ -179,22 +178,27 @@ class TestFindKey:
         key = manager._find_key("alpha", engine=AIEngine.CODEX)
         assert key is None
 
-    async def test_find_without_engine_returns_first_match(
+    async def test_find_without_engine_ambiguous_raises(
         self, manager: NamedSessionManager
     ):
         await self._populate(manager)
-        key = manager._find_key("alpha")
-        assert key is not None
-        # Should match one of the "alpha" sessions
-        session = manager._sessions[key]
-        assert session.display_name == "alpha"
+        with pytest.raises(AmbiguousSessionError):
+            manager._find_key("alpha")
+
+    async def test_find_without_engine_single_match(
+        self, manager: NamedSessionManager
+    ):
+        """When only one engine has the name, _find_key returns it."""
+        await self._populate(manager)
+        key = manager._find_key("beta")  # only codex:beta exists
+        assert key == "codex:beta"
 
     async def test_find_without_engine_case_insensitive(
         self, manager: NamedSessionManager
     ):
         await self._populate(manager)
-        key = manager._find_key("ALPHA")
-        assert key is not None
+        key = manager._find_key("BETA")
+        assert key == "codex:beta"
 
     async def test_find_nonexistent_returns_none(self, manager: NamedSessionManager):
         await self._populate(manager)
@@ -221,11 +225,10 @@ class TestGet:
         assert session is not None
         assert session.engine == AIEngine.GEMINI
 
-    async def test_get_without_engine(self, manager: NamedSessionManager):
+    async def test_get_without_engine_ambiguous_raises(self, manager: NamedSessionManager):
         await self._populate(manager)
-        session = manager.get("X")
-        assert session is not None
-        assert session.display_name == "X"
+        with pytest.raises(AmbiguousSessionError):
+            manager.get("X")
 
     async def test_get_nonexistent_returns_none(self, manager: NamedSessionManager):
         await self._populate(manager)
@@ -255,17 +258,17 @@ class TestParseAddress:
         assert name == "jiho"
         assert content == "hello world"
 
-    async def test_hash_routes_to_gemini(self, manager: NamedSessionManager):
+    async def test_double_at_routes_to_gemini(self, manager: NamedSessionManager):
         await self._populate(manager)
-        result = manager.parse_address("#suho report please")
+        result = manager.parse_address("@@suho report please")
         assert result is not None
         name, content = result
         assert name == "suho"
         assert content == "report please"
 
-    async def test_dollar_routes_to_codex(self, manager: NamedSessionManager):
+    async def test_triple_at_routes_to_codex(self, manager: NamedSessionManager):
         await self._populate(manager)
-        result = manager.parse_address("$david write code")
+        result = manager.parse_address("@@@david write code")
         assert result is not None
         name, content = result
         assert name == "david"
@@ -276,7 +279,7 @@ class TestParseAddress:
         assert manager.parse_address("@unknown hello") is None
 
     async def test_wrong_prefix_for_engine_returns_none(self, manager: NamedSessionManager):
-        """@suho should not match because suho is Gemini (needs #)."""
+        """@suho should not match because suho is Gemini (needs @@)."""
         await self._populate(manager)
         assert manager.parse_address("@suho hello") is None
 
@@ -300,6 +303,11 @@ class TestParseAddress:
         assert name == "jiho"
         assert "line1" in content
         assert "line3" in content
+
+    async def test_at_does_not_route_to_gemini(self, manager: NamedSessionManager):
+        """@suho should not match suho (Gemini) — wrong prefix."""
+        await self._populate(manager)
+        assert manager.parse_address("@suho hello") is None
 
 
 # ============================================================================
@@ -327,14 +335,14 @@ class TestParseAddressFull:
 
     async def test_returns_engine_gemini(self, manager: NamedSessionManager):
         await self._populate(manager)
-        result = manager.parse_address_full("#suho report")
+        result = manager.parse_address_full("@@suho report")
         assert result is not None
         _, _, engine = result
         assert engine == AIEngine.GEMINI
 
     async def test_returns_engine_codex(self, manager: NamedSessionManager):
         await self._populate(manager)
-        result = manager.parse_address_full("$david code")
+        result = manager.parse_address_full("@@@david code")
         assert result is not None
         _, _, engine = result
         assert engine == AIEngine.CODEX
@@ -345,7 +353,7 @@ class TestParseAddressFull:
 
     async def test_no_content_returns_none(self, manager: NamedSessionManager):
         await self._populate(manager)
-        assert manager.parse_address_full("#suho") is None
+        assert manager.parse_address_full("@@suho") is None
 
 
 # ============================================================================
@@ -416,13 +424,10 @@ class TestDelete:
         # Gemini session should be gone
         assert manager.get("target", engine=AIEngine.GEMINI) is None
 
-    async def test_delete_without_engine(self, manager: NamedSessionManager):
+    async def test_delete_without_engine_ambiguous_raises(self, manager: NamedSessionManager):
         await self._populate(manager)
-        result = await manager.delete("target")
-        assert result is True
-        # At least one "target" should be removed; one may remain
-        remaining = [s for s in manager.list_all() if s.display_name == "target"]
-        assert len(remaining) <= 1
+        with pytest.raises(AmbiguousSessionError):
+            await manager.delete("target")
 
     async def test_delete_nonexistent_returns_false(self, manager: NamedSessionManager):
         result = await manager.delete("nonexistent")
@@ -444,60 +449,6 @@ class TestDelete:
         mock_db.reset_mock()
         await manager.delete("delme", engine=AIEngine.CODEX)
         mock_db.delete_named_session.assert_awaited_once()
-
-
-# ============================================================================
-# _parse_engine_prefix (commands.py)
-# ============================================================================
-
-
-class TestParseEnginePrefix:
-    """//// => all 3, /// => codex, // => gemini, none => claude."""
-
-    def test_no_prefix_returns_claude(self):
-        name, engines = _parse_engine_prefix("david")
-        assert name == "david"
-        assert engines == [AIEngine.CLAUDE]
-
-    def test_double_slash_returns_gemini(self):
-        name, engines = _parse_engine_prefix("//suho")
-        assert name == "suho"
-        assert engines == [AIEngine.GEMINI]
-
-    def test_triple_slash_returns_codex(self):
-        name, engines = _parse_engine_prefix("///bot")
-        assert name == "bot"
-        assert engines == [AIEngine.CODEX]
-
-    def test_quad_slash_returns_all_three(self):
-        name, engines = _parse_engine_prefix("////team")
-        assert name == "team"
-        assert len(engines) == 3
-        assert AIEngine.CLAUDE in engines
-        assert AIEngine.GEMINI in engines
-        assert AIEngine.CODEX in engines
-
-    def test_quad_slash_order(self):
-        """Order should be Claude, Gemini, Codex."""
-        _, engines = _parse_engine_prefix("////x")
-        assert engines == [AIEngine.CLAUDE, AIEngine.GEMINI, AIEngine.CODEX]
-
-    def test_single_slash_is_part_of_name(self):
-        """A single / is NOT a prefix -- it stays in the name."""
-        name, engines = _parse_engine_prefix("/hello")
-        assert name == "/hello"
-        assert engines == [AIEngine.CLAUDE]
-
-    def test_five_slashes_treated_as_quad_plus_extra(self):
-        """///// => //// prefix + remaining '/' in name."""
-        name, engines = _parse_engine_prefix("/////extra")
-        assert name == "/extra"
-        assert len(engines) == 3
-
-    def test_empty_name_after_prefix(self):
-        name, engines = _parse_engine_prefix("//")
-        assert name == ""
-        assert engines == [AIEngine.GEMINI]
 
 
 # ============================================================================
@@ -626,8 +577,8 @@ class TestConstants:
 
     def test_prefix_engine_map(self):
         assert NamedSessionManager.PREFIX_ENGINE_MAP["@"] == AIEngine.CLAUDE
-        assert NamedSessionManager.PREFIX_ENGINE_MAP["#"] == AIEngine.GEMINI
-        assert NamedSessionManager.PREFIX_ENGINE_MAP["$"] == AIEngine.CODEX
+        assert NamedSessionManager.PREFIX_ENGINE_MAP["@@"] == AIEngine.GEMINI
+        assert NamedSessionManager.PREFIX_ENGINE_MAP["@@@"] == AIEngine.CODEX
 
     def test_engine_icons_has_all_engines(self):
         for engine in AIEngine:
@@ -673,11 +624,11 @@ class TestMultiEngineIntegration:
         assert result is not None
         assert result[0] == "worker"
 
-        # #worker should fail (deleted)
-        assert manager.parse_address("#worker hello") is None
+        # @@worker should fail (deleted)
+        assert manager.parse_address("@@worker hello") is None
 
-        # $worker should work
-        result = manager.parse_address("$worker code it")
+        # @@@worker should work
+        result = manager.parse_address("@@@worker code it")
         assert result is not None
         assert result[0] == "worker"
 

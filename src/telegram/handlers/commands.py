@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 import tempfile
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from telegram import Update
@@ -57,8 +58,7 @@ async def start_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         "/close\\_claude \\[이름\\] \\- 🟣 Claude 세션 종료 \\(이름 없으면 전체\\)\n"
         "/close\\_gemini \\[이름\\] \\- 💎 Gemini 세션 종료 \\(이름 없으면 전체\\)\n"
         "/close\\_gpt \\[이름\\] \\- 🤖 GPT 세션 종료 \\(이름 없으면 전체\\)\n"
-        "/close\\_all \\- 모든 세션 종료 \\+ 기본 세션 재시작\n"
-        "/default \\[이름\\] \\- 기본 라우팅 세션 설정/해제 \\(엔진 지정 가능\\)\n\n"
+        "/close\\_all \\- 모든 세션 종료\n\n"
         "📨 *메시지 라우팅*\n"
         "`@이름 메시지` \\- 🟣 Claude 세션\n"
         "`@@이름 메시지` \\- 💎 Gemini 세션\n"
@@ -72,7 +72,8 @@ async def start_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         "/job \\- 처리 중/대기 중 작업 목록\n"
         "/clean \\- 대화 이력 및 캐시 초기화\n"
         "/status \\- 시스템 상태\n"
-        "/history \\- 대화 이력\n\n"
+        "/history \\- 대화 이력\n"
+        "/wol \\[이름\\|MAC\\] \\- Wake on LAN 매직 패킷 전송\n\n"
         "🔐 *인증*\n"
         "/login codex \\- Codex \\(ChatGPT\\) OAuth 인증\n"
         "/logout codex \\- Codex 인증 토큰 삭제\n"
@@ -123,11 +124,25 @@ async def new_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int | N
     if not await _check_allowed(update, ctx):
         return None
 
+    manager: NamedSessionManager | None = ctx.bot_data.get("named_session_manager")
+
     args = ctx.args or []
     if not args:
-        # 기본 세션 리셋
-        await session_mod.new_session()
-        await update.message.reply_text("새 대화를 시작했습니다.")
+        # 인수 없음 → 기본 세션 재생성
+        if not manager:
+            await update.message.reply_text("❌ 세션 관리자가 초기화되지 않았습니다.")
+            return None
+        default_name: str = ctx.bot_data.get("default_session_name", "default")
+        # 기존 세션이 있으면 먼저 삭제
+        existing = manager.get(default_name, engine=AIEngine.CLAUDE)
+        if existing is not None:
+            await manager.delete(default_name, engine=AIEngine.CLAUDE)
+        session = await manager.create(default_name, engine=AIEngine.CLAUDE)
+        await manager.set_default(default_name, engine=AIEngine.CLAUDE)
+        await update.message.reply_text(
+            f"✅ 기본 세션 *'{session.display_name}'* 을 새로 시작했습니다.",
+            parse_mode="Markdown",
+        )
         return None
 
     # 이름 세션 생성 - 첫 인자만 이름 (공백 불가)
@@ -136,7 +151,6 @@ async def new_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int | N
         await update.message.reply_text("❌ 세션 이름을 입력해주세요.")
         return None
 
-    manager: NamedSessionManager | None = ctx.bot_data.get("named_session_manager")
     if not manager:
         await update.message.reply_text("❌ 세션 관리자가 초기화되지 않았습니다.")
         return None
@@ -309,6 +323,34 @@ async def _show_session_list(
     await update.message.reply_text("\n".join(msg_parts), parse_mode="Markdown")
 
 
+_ENGINE_ARG_MAP: dict[str, AIEngine] = {
+    "claude": AIEngine.CLAUDE,
+    "gemini": AIEngine.GEMINI,
+    "gpt": AIEngine.CODEX,
+}
+
+
+async def session_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """/session [claude|gemini|gpt] - 세션 목록 조회."""
+    if not await _check_allowed(update, ctx):
+        return
+
+    args = ctx.args or []
+    if args:
+        engine_key = args[0].lower()
+        engine = _ENGINE_ARG_MAP.get(engine_key)
+        if engine is None:
+            await update.message.reply_text(
+                f"❌ 알 수 없는 엔진: `{args[0]}`\n사용 가능: claude, gemini, gpt",
+                parse_mode="Markdown",
+            )
+            return
+    else:
+        engine = None
+
+    await _show_session_list(update, ctx, engine_filter=engine)
+
+
 async def close_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """/close [이름] - 이름 세션 종료.
 
@@ -326,9 +368,15 @@ async def close_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
     args = ctx.args or []
     if not args:
-        # 인수 없이 호출 → 기본 세션(전역) 리셋
-        await session_mod.new_session()
-        await update.message.reply_text("✅ 기본 세션이 초기화되었습니다.")
+        # 인수 없이 호출 → 기본 세션 종료
+        default = manager.default_session
+        if default is None:
+            await update.message.reply_text("ℹ️ 지정된 기본 세션이 없습니다.")
+            return
+        await manager.delete(default.display_name, engine=default.engine)
+        await update.message.reply_text(
+            f"✅ 기본 세션 *'{default.display_name}'* 을 종료했습니다.", parse_mode="Markdown"
+        )
         return
 
     raw = " ".join(args).strip()
@@ -421,71 +469,6 @@ async def close_gpt_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> N
     await _do_close(update, ctx, AIEngine.CODEX)
 
 
-async def default_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """/default [name] - 기본 라우팅 세션 변경
-
-    /default <이름>  : 이름 없는 메시지를 해당 세션으로 전달
-    /default        : .env 기본 세션으로 복원 (이미 기본이면 무시)
-    """
-    if not await _check_allowed(update, ctx):
-        return
-
-    manager: "NamedSessionManager | None" = ctx.bot_data.get("named_session_manager")
-    if not manager:
-        await update.message.reply_text("❌ 세션 관리자가 초기화되지 않았습니다.")
-        return
-
-    from src.shared.named_sessions import NamedSessionNotFoundError, AmbiguousSessionError
-
-    args = ctx.args or []
-    if not args:
-        config_default: str | None = ctx.bot_data.get("default_session_name")
-        if not config_default:
-            await update.message.reply_text(
-                "ℹ️ .env에 DEFAULT_SESSION_NAME이 설정되지 않았습니다.\n"
-                "사용법: `/default <세션이름>` 또는 `/default @이름` (엔진 지정)",
-                parse_mode="Markdown",
-            )
-            return
-
-        # 이미 .env 기본 세션이면 무시
-        current = manager.default_session
-        if current and current.display_name.strip().lower() == config_default.strip().lower():
-            return
-
-        # 다른 세션이 기본이면 → .env 기본 세션으로 복원
-        try:
-            clean, eng = manager.parse_name_engine(config_default)
-            session = await manager.set_default(clean, engine=eng)
-            await update.message.reply_text(
-                f"↩️ 기본 세션 복원: *{session.display_name}*",
-                parse_mode="Markdown",
-            )
-        except (NamedSessionNotFoundError, AmbiguousSessionError) as e:
-            await update.message.reply_text(f"❌ {e}")
-        return
-
-    raw = " ".join(args).strip()
-    clean_name, engine = manager.parse_name_engine(raw)
-    try:
-        session = await manager.set_default(clean_name, engine=engine)
-        await update.message.reply_text(
-            f"✅ 기본 세션: *{session.display_name}* [{session.engine.value}]\n"
-            f"📁 `{session.working_dir}`\n\n"
-            f"이제 이름 없는 메시지가 이 세션으로 전달됩니다.\n"
-            f"복원: `/default`",
-            parse_mode="Markdown",
-        )
-    except AmbiguousSessionError as e:
-        await update.message.reply_text(f"❌ {e}", parse_mode="Markdown")
-    except NamedSessionNotFoundError:
-        sessions = manager.list_all()
-        names = ", ".join(f"`{s.display_name}`" for s in sessions) if sessions else "없음"
-        await update.message.reply_text(
-            f"❌ '{raw}' 세션을 찾을 수 없습니다.\n\n"
-            f"등록된 세션: {names}",
-            parse_mode="Markdown",
-        )
 
 
 def _split_message(text: str, max_length: int = 3000) -> list[str]:
@@ -610,15 +593,21 @@ async def _process_message(
                     await store.append(role="assistant", content=reply, **_kw)
             elif img_manager and img_manager.default_session is not None:
                 default = img_manager.default_session
-                reply = await img_manager.ask(default.display_name, prompt, engine=default.engine)
+                img_prompt = f"[이미지 첨부됨: image.jpg]\n{caption or ''}"
+                reply = await img_manager.ask(default.display_name, img_prompt, engine=default.engine)
                 engine_label = ENGINE_LABELS.get(default.engine, default.engine.value)
                 sender = f"{engine_label} | {default.display_name}"
                 if store:
                     _kw = dict(session_name=default.display_name, session_uid=default.session_uid, session_id=default.claude_session_id)
-                    await store.append(role="user", content=prompt, **_kw)
+                    await store.append(role="user", content=img_prompt, **_kw)
                     await store.append(role="assistant", content=reply, **_kw)
             else:
-                reply = await session_mod.ask(prompt, save_history=True)
+                sessions = img_manager.list_all() if img_manager else []
+                if sessions:
+                    names = "\n".join(f"  • `@{s.display_name}` ({ENGINE_LABELS.get(s.engine, s.engine.value)})" for s in sessions)
+                    reply = f"❌ 기본 세션이 지정되지 않았습니다.\n\n등록된 세션:\n{names}\n\n사용법: `@세션이름 메시지`"
+                else:
+                    reply = "❌ 활성화된 세션이 없습니다.\n`/open <이름>` 으로 세션을 생성하세요."
             await _delete_ack()
             await _send_reply(reply, session_name=sender)
         except Exception as e:
@@ -645,7 +634,27 @@ async def _process_message(
 
     typing_task = asyncio.create_task(keep_typing())
     try:
-        # 1. prefix 라우팅 시도 (@=Claude, #=Gemini, $=GPT)
+        # 0. @@@@이름 브로드캐스트 (해당 이름의 모든 엔진 세션에 동시 전달)
+        broadcast = manager.parse_broadcast(prompt) if manager else None
+        if broadcast:
+            bcast_name, bcast_content = broadcast
+            sessions_for_name = [s for s in manager.list_all() if s.display_name.lower() == bcast_name.lower()]
+            tasks = [manager.ask(s.display_name, bcast_content, engine=s.engine) for s in sessions_for_name]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            parts = []
+            for s, result in zip(sessions_for_name, results):
+                label = f"{ENGINE_LABELS.get(s.engine, s.engine.value)} | {s.display_name}"
+                if isinstance(result, Exception):
+                    parts.append(f"[{label}]\n❌ 오류: {result}")
+                else:
+                    parts.append(f"[{label}]\n{result}")
+            await _delete_ack()
+            for part in parts:
+                await _send_reply(part)
+            typing_task.cancel()
+            return
+
+        # 1. prefix 라우팅 시도 (@=Claude, @@=Gemini, @@@=GPT)
         target_full = manager.parse_address_full(prompt) if manager else None
         sender: str | None = None
         if target_full:
@@ -663,23 +672,27 @@ async def _process_message(
             except NamedSessionNotFoundError:
                 reply = f"❌ '{session_name}' 세션을 찾을 수 없습니다."
         elif manager and manager.default_session is not None:
-            # 2. default session이 설정된 경우 해당 세션으로 전달
+            # 2. default session → 해당 세션으로 전달
             default = manager.default_session
             try:
                 reply = await manager.ask(default.display_name, prompt, engine=default.engine)
                 engine_label = ENGINE_LABELS.get(default.engine, default.engine.value)
                 sender = f"{engine_label} | {default.display_name}"
-                # default named session 이력 저장
                 if store:
                     _kw = dict(session_name=default.display_name, session_uid=default.session_uid, session_id=default.claude_session_id)
                     await store.append(role="user", content=prompt, **_kw)
                     await store.append(role="assistant", content=reply, **_kw)
             except NamedSessionNotFoundError:
                 await manager.clear_default()
-                reply = await session_mod.ask(prompt, save_history=True)
+                reply = "❌ 기본 세션이 종료되었습니다.\n`/open <이름>` 으로 세션을 다시 생성하세요."
         else:
-            # 3. 기본 Claude 세션 풀로 전달
-            reply = await session_mod.ask(prompt, save_history=True)
+            # 3. 기본 세션 없음 → 오류 안내
+            sessions = manager.list_all() if manager else []
+            if sessions:
+                names = "\n".join(f"  • `@{s.display_name}` ({ENGINE_LABELS.get(s.engine, s.engine.value)})" for s in sessions)
+                reply = f"❌ 기본 세션이 지정되지 않았습니다.\n\n등록된 세션:\n{names}\n\n사용법: `@세션이름 메시지`"
+            else:
+                reply = "❌ 활성화된 세션이 없습니다.\n`/open <이름>` 으로 세션을 생성하세요."
 
         await _delete_ack()
         await _send_reply(reply, session_name=sender)
@@ -692,7 +705,7 @@ async def _process_message(
 
 
 async def close_all_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """/close_all - 모든 이름 세션 종료 후 기본 세션 재시작"""
+    """/close_all - 모든 이름 세션 종료"""
     if not await _check_allowed(update, ctx):
         return
 
@@ -703,23 +716,6 @@ async def close_all_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> N
 
     count = await manager.delete_all()
     await update.message.reply_text(f"🗑️ 세션 {count}개를 모두 종료했습니다.")
-
-    # 기본 세션 재시작
-    default_session_name: str | None = ctx.bot_data.get("default_session_name")
-    if default_session_name:
-        from src.shared.ai_session import _make_working_dir
-        try:
-            session = await manager.create(
-                default_session_name,
-                working_dir=_make_working_dir("default"),
-            )
-            await manager.set_default(default_session_name)
-            await update.message.reply_text(
-                f"✅ 기본 세션 *'{session.display_name}'* 재시작 완료.",
-                parse_mode="Markdown",
-            )
-        except Exception as e:
-            await update.message.reply_text(f"❌ 기본 세션 재시작 실패: {e}")
 
 
 async def clean_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1046,4 +1042,105 @@ async def login_gemini_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -
         parse_mode="MarkdownV2",
     )
 
+
+def _load_wol_devices() -> dict:
+    """프로젝트 루트의 .wol.json에서 기기 목록 로드."""
+    import json
+    import sys
+
+    candidates = []
+    if getattr(sys, "frozen", False):
+        candidates.append(Path(sys.executable).parent / ".wol.json")
+    else:
+        candidates.append(Path(__file__).resolve().parent.parent.parent / ".wol.json")
+    candidates.append(Path.cwd() / ".wol.json")
+
+    for p in candidates:
+        if p.is_file():
+            try:
+                data = json.loads(p.read_text(encoding="utf-8"))
+                return data.get("devices", {})
+            except Exception:
+                pass
+    return {}
+
+
+async def wol_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """/wol - Wake on LAN 매직 패킷 전송.
+
+    /wol                - .wol.json 기기 목록 표시
+    /wol <이름>          - .wol.json에 저장된 기기로 전송 (예: /wol nas)
+    /wol <MAC>          - 직접 MAC 주소로 전송 (예: /wol 58-11-22-BB-F9-5F)
+    /wol <MAC> <브로드캐스트> - 브로드캐스트 주소 지정
+    """
+    if not await _check_allowed(update, ctx):
+        return
+
+    import socket
+
+    args = ctx.args or []
+    devices = _load_wol_devices()
+
+    # 인자 없음 → 기기 목록 표시
+    if not args:
+        if devices:
+            lines = ["📋 *저장된 WOL 기기 목록*\n"]
+            for name, info in devices.items():
+                desc = info.get("description", "")
+                mac = info.get("mac", "")
+                lines.append(f"• `{name}` — {mac}" + (f" ({desc})" if desc else ""))
+            lines.append(f"\n사용법: `/wol <이름>` 또는 `/wol <MAC>`")
+            await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+        else:
+            await update.message.reply_text(
+                "❌ 저장된 기기가 없습니다.\n"
+                "`.wol.json` 파일을 프로젝트 루트에 생성하거나\n"
+                "직접 MAC 주소를 입력하세요.\n\n"
+                "예: `/wol 58-11-22-BB-F9-5F`",
+                parse_mode="Markdown",
+            )
+        return
+
+    target = args[0]
+    broadcast = args[1] if len(args) > 1 else None
+
+    # 이름으로 기기 조회
+    device = devices.get(target.lower())
+    if device:
+        mac_str = device.get("mac", "")
+        broadcast = broadcast or device.get("broadcast", "255.255.255.255")
+        label = f"{target} ({device.get('description', mac_str)})"
+    else:
+        # 직접 MAC 주소 입력
+        mac_str = target
+        broadcast = broadcast or os.environ.get("WOL_BROADCAST", "255.255.255.255")
+        label = mac_str
+
+    # MAC 파싱 (구분자 제거)
+    mac_clean = mac_str.replace("-", "").replace(":", "").upper()
+    if len(mac_clean) != 12 or not all(c in "0123456789ABCDEF" for c in mac_clean):
+        hint = f"\n저장된 기기: {', '.join(f'`{n}`' for n in devices)}" if devices else ""
+        await update.message.reply_text(
+            f"❌ 알 수 없는 이름 또는 잘못된 MAC 형식: `{target}`{hint}",
+            parse_mode="Markdown",
+        )
+        return
+
+    mac_bytes = bytes.fromhex(mac_clean)
+    magic = b'\xff' * 6 + mac_bytes * 16  # 102 bytes
+
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+            sock.sendto(magic, (broadcast, 9))
+
+        await update.message.reply_text(
+            f"✅ WOL 매직 패킷 전송 완료!\n"
+            f"대상: `{label}`\n"
+            f"MAC: `{mac_str.upper()}`\n"
+            f"브로드캐스트: `{broadcast}`",
+            parse_mode="Markdown",
+        )
+    except Exception as e:
+        await update.message.reply_text(f"❌ 전송 실패: {e}")
 

@@ -106,8 +106,8 @@ async def _async_main(stop_event: asyncio.Event) -> None:
         token=settings.telegram_bot_token.get_secret_value(),
         allowed_users=settings.telegram_chat_id,
         history_store=history_store,
-        default_session_name=settings.default_session_name or None,
         db=db,
+        default_session_name=settings.default_session_name or None,
     )
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
