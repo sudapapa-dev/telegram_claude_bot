@@ -58,7 +58,8 @@ async def start_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         "/close\\_claude \\[이름\\] \\- 🟣 Claude 세션 종료 \\(이름 없으면 전체\\)\n"
         "/close\\_gemini \\[이름\\] \\- 💎 Gemini 세션 종료 \\(이름 없으면 전체\\)\n"
         "/close\\_gpt \\[이름\\] \\- 🤖 GPT 세션 종료 \\(이름 없으면 전체\\)\n"
-        "/close\\_all \\- 모든 세션 종료\n\n"
+        "/close\\_all \\- 모든 세션 종료\n"
+        "/default \\[이름\\] \\- 기본 라우팅 세션 설정/해제\n\n"
         "📨 *메시지 라우팅*\n"
         "`@이름 메시지` \\- 🟣 Claude 세션\n"
         "`@@이름 메시지` \\- 💎 Gemini 세션\n"
@@ -73,7 +74,10 @@ async def start_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         "/clean \\- 대화 이력 및 캐시 초기화\n"
         "/status \\- 시스템 상태\n"
         "/history \\- 대화 이력\n"
-        "/wol \\[이름\\|MAC\\] \\- Wake on LAN 매직 패킷 전송\n\n"
+        "/wol \\[이름\\|MAC\\] \\- Wake on LAN 매직 패킷 전송\n"
+        "/shot \\[번호\\] \\- 스크린샷 전송 \\(번호 없으면 전체 모니터\\)\n"
+        "/shutdown \\- PC 종료 \\(3초 후, 취소: /shutdown cancel\\)\n"
+        "/reboot \\- PC 재부팅 \\(3초 후, 취소: /reboot cancel\\)\n\n"
         "🔐 *인증*\n"
         "/login codex \\- Codex \\(ChatGPT\\) OAuth 인증\n"
         "/logout codex \\- Codex 인증 토큰 삭제\n"
@@ -704,6 +708,57 @@ async def _process_message(
         typing_task.cancel()
 
 
+async def default_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """/default [이름] - 기본 라우팅 세션 설정/해제.
+
+    이름 없이 호출 시 현재 기본 세션 해제.
+    이름 지정 시 해당 세션을 기본으로 설정 (@@@이름 등 엔진 접두사 사용 가능).
+    """
+    if not await _check_allowed(update, ctx):
+        return
+
+    from src.shared.named_sessions import NamedSessionManager, NamedSessionNotFoundError
+    manager: NamedSessionManager | None = ctx.bot_data.get("named_session_manager")
+    if not manager:
+        await update.message.reply_text("❌ 세션 관리자가 초기화되지 않았습니다.")
+        return
+
+    args = ctx.args or []
+    if not args:
+        # 인수 없음 → 현재 기본 세션 해제
+        current = manager.default_session
+        if current is None:
+            await update.message.reply_text("ℹ️ 현재 기본 세션이 없습니다.")
+            return
+        await manager.clear_default()
+        label = ENGINE_LABELS.get(current.engine, current.engine.value)
+        await update.message.reply_text(
+            f"✅ 기본 세션 *{label} | {current.display_name}* 이 해제되었습니다.",
+            parse_mode="Markdown",
+        )
+        return
+
+    raw = " ".join(args).strip()
+    clean_name, engine = manager.parse_name_engine(raw)
+
+    try:
+        session = await manager.set_default(clean_name, engine=engine)
+        label = ENGINE_LABELS.get(session.engine, session.engine.value)
+        await update.message.reply_text(
+            f"✅ 기본 세션이 *{label} | {session.display_name}* 으로 설정되었습니다.\n"
+            f"이제 일반 메시지는 이 세션으로 전달됩니다.",
+            parse_mode="Markdown",
+        )
+    except NamedSessionNotFoundError:
+        sessions = manager.list_all()
+        names = ", ".join(f"`{s.display_name}`" for s in sessions) if sessions else "없음"
+        await update.message.reply_text(
+            f"❌ '{raw}' 세션을 찾을 수 없습니다.\n\n"
+            f"등록된 세션: {names}",
+            parse_mode="Markdown",
+        )
+
+
 async def close_all_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """/close_all - 모든 이름 세션 종료"""
     if not await _check_allowed(update, ctx):
@@ -1041,6 +1096,153 @@ async def login_gemini_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -
         "`/login gemini cancel`",
         parse_mode="MarkdownV2",
     )
+
+
+async def shot_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """/shot [번호] - 스크린샷 전송.
+
+    번호 없으면 모든 모니터 스크린샷을 각각 전송.
+    /shot 1 → 1번 모니터, /shot 2 → 2번 모니터
+    """
+    if not await _check_allowed(update, ctx):
+        return
+
+    import io
+
+    try:
+        import mss
+        import mss.tools
+    except ImportError:
+        await update.message.reply_text(
+            "❌ `mss` 라이브러리가 설치되지 않았습니다.\n`pip install mss` 로 설치하세요.",
+            parse_mode="Markdown",
+        )
+        return
+
+    args = ctx.args or []
+
+    with mss.mss() as sct:
+        monitor_count = len(sct.monitors) - 1  # monitors[0]은 가상 전체 화면
+
+        if args:
+            try:
+                mon_idx = int(args[0])
+            except ValueError:
+                await update.message.reply_text(
+                    f"❌ 잘못된 모니터 번호: `{args[0]}`\n사용 가능: 1~{monitor_count}",
+                    parse_mode="Markdown",
+                )
+                return
+
+            if mon_idx < 1 or mon_idx > monitor_count:
+                await update.message.reply_text(
+                    f"❌ 모니터 {mon_idx}번이 없습니다. (사용 가능: 1~{monitor_count})"
+                )
+                return
+
+            shot = sct.grab(sct.monitors[mon_idx])
+            buf = io.BytesIO(mss.tools.to_png(shot.rgb, shot.size))
+            buf.name = f"monitor_{mon_idx}.png"
+            await update.message.reply_photo(photo=buf, caption=f"🖥 모니터 {mon_idx}")
+        else:
+            if monitor_count == 0:
+                await update.message.reply_text("❌ 감지된 모니터가 없습니다.")
+                return
+            for i in range(1, monitor_count + 1):
+                shot = sct.grab(sct.monitors[i])
+                buf = io.BytesIO(mss.tools.to_png(shot.rgb, shot.size))
+                buf.name = f"monitor_{i}.png"
+                await update.message.reply_photo(
+                    photo=buf, caption=f"🖥 모니터 {i}/{monitor_count}"
+                )
+
+
+async def shutdown_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """/shutdown - 3초 후 PC 종료. /shutdown cancel로 취소."""
+    if not await _check_allowed(update, ctx):
+        return
+
+    import platform
+    import subprocess
+
+    args = ctx.args or []
+    system = platform.system()
+
+    # 취소 처리
+    if args and args[0].lower() == "cancel":
+        try:
+            if system == "Windows":
+                subprocess.run(["shutdown", "/a"], check=True, capture_output=True)
+            else:
+                subprocess.run(["shutdown", "-c"], check=True, capture_output=True)
+            await update.message.reply_text("✅ 예약된 종료가 취소되었습니다.")
+        except subprocess.CalledProcessError:
+            await update.message.reply_text("❌ 취소할 예약된 종료가 없습니다.")
+        return
+
+    try:
+        if system == "Windows":
+            subprocess.run(
+                ["shutdown", "/s", "/t", "3"],
+                check=True, capture_output=True,
+            )
+        else:
+            subprocess.run(
+                ["shutdown", "-h", "now"],
+                check=True, capture_output=True,
+            )
+        await update.message.reply_text(
+            "⏻ 3초 후 PC가 종료됩니다.\n취소: `/shutdown cancel`",
+            parse_mode="Markdown",
+        )
+    except subprocess.CalledProcessError as e:
+        await update.message.reply_text(f"❌ 종료 명령 실패: {e.stderr.decode().strip()}")
+    except FileNotFoundError:
+        await update.message.reply_text("❌ shutdown 명령을 찾을 수 없습니다.")
+
+
+async def reboot_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """/reboot - 3초 후 PC 재부팅. /reboot cancel로 취소."""
+    if not await _check_allowed(update, ctx):
+        return
+
+    import platform
+    import subprocess
+
+    args = ctx.args or []
+    system = platform.system()
+
+    # 취소 처리
+    if args and args[0].lower() == "cancel":
+        try:
+            if system == "Windows":
+                subprocess.run(["shutdown", "/a"], check=True, capture_output=True)
+            else:
+                subprocess.run(["shutdown", "-c"], check=True, capture_output=True)
+            await update.message.reply_text("✅ 예약된 재부팅이 취소되었습니다.")
+        except subprocess.CalledProcessError:
+            await update.message.reply_text("❌ 취소할 예약된 재부팅이 없습니다.")
+        return
+
+    try:
+        if system == "Windows":
+            subprocess.run(
+                ["shutdown", "/r", "/t", "3"],
+                check=True, capture_output=True,
+            )
+        else:
+            subprocess.run(
+                ["shutdown", "-r", "now"],
+                check=True, capture_output=True,
+            )
+        await update.message.reply_text(
+            "🔄 3초 후 PC가 재부팅됩니다.\n취소: `/reboot cancel`",
+            parse_mode="Markdown",
+        )
+    except subprocess.CalledProcessError as e:
+        await update.message.reply_text(f"❌ 재부팅 명령 실패: {e.stderr.decode().strip()}")
+    except FileNotFoundError:
+        await update.message.reply_text("❌ shutdown 명령을 찾을 수 없습니다.")
 
 
 def _load_wol_devices() -> dict:

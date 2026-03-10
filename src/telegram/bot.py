@@ -25,12 +25,16 @@ from src.telegram.handlers.commands import (
     close_command,
     close_gemini_command,
     close_gpt_command,
+    default_command,
     history_command,
     login_command,
     logout_command,
     new_command,
     open_command, open_claude_command, open_gemini_command, open_gpt_command,
     session_command,
+    shot_command,
+    reboot_command,
+    shutdown_command,
     start_command, status_command,
     wol_command,
 )
@@ -268,12 +272,22 @@ class TelegramClaudeBot:
             ("close_gemini", close_gemini_command),
             ("close_gpt", close_gpt_command),
             ("close_all", close_all_command),
+            ("default", default_command),
             ("session", session_command),
             ("login", login_command),
             ("logout", logout_command),
             ("wol", wol_command),
         ]:
             self.app.add_handler(CommandHandler(name, handler))
+
+        # shot/shutdown/reboot: Docker 컨테이너 안에서는 등록하지 않음 (디스플레이/OS 제어 불가)
+        if not Path("/.dockerenv").exists():
+            for name, handler in [
+                ("shot", shot_command),
+                ("shutdown", shutdown_command),
+                ("reboot", reboot_command),
+            ]:
+                self.app.add_handler(CommandHandler(name, handler))
         self.app.add_handler(CommandHandler("job", self._job_command))
         self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._enqueue_handler))
         self.app.add_handler(MessageHandler(filters.PHOTO, self._enqueue_handler))
@@ -318,6 +332,10 @@ class TelegramClaudeBot:
                         session_name, _, engine = parsed_full
                         target_session = session_name
                         engine_icon = named_mgr.ENGINE_ICONS.get(engine, "")
+                    elif named_mgr.default_session is not None:
+                        default = named_mgr.default_session
+                        target_session = default.display_name
+                        engine_icon = named_mgr.ENGINE_ICONS.get(default.engine, "")
 
             # ACK 메시지 전송 (엔진 아이콘 + 세션 이름 포함)
             session_label = f"[{engine_icon}{target_session}] " if target_session else ""

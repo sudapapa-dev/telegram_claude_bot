@@ -9,6 +9,7 @@ dependencies = [
     "pydantic-settings>=2.0,<2.13",
     "aiosqlite>=0.20.0",
     "structlog>=24.0",
+    "mss>=9.0",
 ]
 
 [project.optional-dependencies]
